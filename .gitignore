@@ -1,0 +1,9 @@
+.agent/
+.env
+.DS_Store
+.agents/
+.claude/
+.codex/
+.cursor/
+.gemini/
+.impeccable/
