@@ -1,0 +1,18 @@
+:root {
+  color-scheme: dark;
+  background: #171a19;
+}
+
+html,
+body,
+#main {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+.blank-page {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: #171a19;
+}

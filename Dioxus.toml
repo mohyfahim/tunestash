@@ -1,0 +1,8 @@
+[application]
+name = "TuneStash"
+sub_package = "music_app"
+asset_dir = "crates/music_app/assets"
+
+[bundle]
+identifier = "com.tunestash.app"
+category = "Music"

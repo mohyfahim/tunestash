@@ -5,6 +5,7 @@
 
 pub mod adapters;
 pub mod runtime;
+#[cfg(feature = "mobile")]
 pub mod ui;
 
 /// Application package version.
