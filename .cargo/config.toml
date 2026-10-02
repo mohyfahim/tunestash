@@ -1,0 +1,11 @@
+# Host build settings for the foundation workspace.
+# Android linkers and TDLib flags stay out of this file so `music_core`
+# builds without an Android SDK or a TDLib installation.
+
+[alias]
+fmt-core = "fmt -p music_core"
+check-core = "check -p music_core --all-targets"
+test-core = "test -p music_core --all-targets"
+
+[term]
+color = "auto"

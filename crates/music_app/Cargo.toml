@@ -1,0 +1,17 @@
+[package]
+name = "music_app"
+description = "TuneStash application shell: UI, runtime, and platform adapters."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "tunestash"
+path = "src/main.rs"
+
+[dependencies]
+music_core = { path = "../music_core" }
+
+[lints]
+workspace = true
