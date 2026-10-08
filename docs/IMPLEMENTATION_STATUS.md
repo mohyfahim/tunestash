@@ -1,56 +1,36 @@
 # Implementation status
 
-Updated: 2026-10-02
+Updated: 2026-10-08
 
 ## Implemented
 
-- Existing `music_core` and `music_app` workspace remains intact with Rust
-  1.98.1 pinned.
-- Dioxus 0.7.10 mobile WebView entry point and an empty `BlankPage` render
-  surface with a `#171a19` background.
-- Android configuration for the `TuneStash` launcher label and
-  `com.tunestash.app` application ID.
-- Debug ARM64 APK produced at
-  `target/dx/TuneStash/debug/android/app/app/build/outputs/apk/debug/app-debug.apk`.
+- One-screen TuneStash welcome page based on `concept/login.png`, with the
+  TeleTune name changed and the demo button and pagination removed.
+- Phone-number, verification-code, email-code, and Telegram two-step-password
+  forms. TDLib drives the form shown for the current authorization state.
+- An empty `#171a19` canvas after TDLib confirms authorization and `getMe`
+  returns the account ID. A saved TDLib session can resume on app launch.
+- Native TDLib C/JSON bridge on a dedicated Rust thread. Android Keystore wraps
+  the local TDLib database key; app files remain under Android private storage.
+- TuneStash launcher icon and Android splash resources, overlaid during the APK
+  build. The build reads Telegram app credentials from ignored `.env`.
 
-## Verified on this host
+## Verification
 
-- `cargo fmt --all -- --check` passed.
-- `cargo check --workspace --all-targets --locked` passed.
-- `cargo check -p music_app --target aarch64-linux-android --features mobile --locked --offline` passed.
-- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` passed.
-- ARM64 `cargo clippy -p music_app --bin TuneStash --target aarch64-linux-android --features mobile --locked --offline -- -D warnings` passed.
-- `cargo test --workspace --all-targets --locked --offline` passed (2 tests).
-- `dx bundle --android --target aarch64-linux-android --package-types apk --package music_app --locked --offline` succeeded with Dioxus CLI 0.7.10, JDK 17.0.20.1, Android NDK 30.0.16248370, and SDK 34. The generated APK is about 61 MiB.
-- `aapt dump badging` reports `com.tunestash.app`, launcher label
-  `TuneStash`, minimum SDK 24, and target SDK 34. APK contents include
-  `lib/arm64-v8a/libmain.so` and the bundled dark stylesheet.
-- APK archive integrity passed `unzip -t`; `apksigner verify` passed with one
-  development signer using APK Signature Scheme v2.
-- `scripts/build-android.sh` passed with the installed JDK, SDK, NDK, Rust
-  target, and Dioxus CLI.
+- Host and Android Rust checks, Clippy, and host unit tests pass.
+- The final APK builds with `libtdjson.so`, the TuneStash icon, and splash
+  resources; archive integrity and APK v2 signature checks pass.
+- Samsung SM-A256E, Android 14, ARM64: the final APK installs, launches, and
+  shows the welcome and phone-number screens. The phone-number step is supplied
+  by TDLib's live authorization state. An initial JNI class-loader crash was
+  fixed during device review.
+- The owner completed a live Telegram sign-in and reached the empty dark
+  canvas. A cold relaunch returned to that canvas from the saved session.
+- A cold-launch recording exposed a brief white WebView frame; native dark
+  background and inline CSS removed the bright frame in a repeat recording.
+- The password branch for accounts with Telegram two-step verification is
+  implemented from TDLib's `authorizationStateWaitPassword` state. It was not
+  separately exercised with a two-step-enabled account during this check.
 
-## Verified on a device
-
-- Samsung SM-A256E, Android 14 (API 34), ARM64, connected by USB through ADB.
-- `adb install -r --user 0` returned `Success` for the script-built APK.
-- `am start --user 0 -W` returned `Status: ok` and `LaunchState: COLD` for
-  `com.tunestash.app/dev.dioxus.main.MainActivity` (1,154 ms reported by ADB).
-- The app process stayed alive and the activity was `topResumedActivity`.
-- [Captured screenshot](device-evidence/sm-a256e-android14-blank.png) shows a
-  blank dark page; a center pixel is RGB (23, 26, 25), matching `#171a19`.
-- The sampled app-process log contained no fatal exception or Rust panic.
-
-## Simulated or unverified
-
-- Login, Telegram, SQLite, media playback, offline downloads, and service
-  lifecycle behavior have no implementation or verification yet.
-- iOS has no build or device evidence.
-
-## Rust learning note
-
-`App` and `BlankPage` are plain Rust functions returning Dioxus `Element`
-values. The `mobile` feature gates the executable and UI dependency, so the
-core remains buildable on a host without Android tooling. This milestone has
-no shared state, long-running tasks, or ownership across threads; those
-choices belong to later service work.
+Media indexing, playback, offline downloads, and the music-source selection
+interface remain future work. The signed-in page is intentionally empty.

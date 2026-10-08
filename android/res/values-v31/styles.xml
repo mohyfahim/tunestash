@@ -1,0 +1,10 @@
+<resources>
+    <style name="TuneStashTheme" parent="AppTheme">
+        <item name="android:windowBackground">@color/tunestash_background</item>
+        <item name="android:windowSplashScreenBackground">@color/tunestash_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash</item>
+        <item name="android:statusBarColor">@color/tunestash_background</item>
+        <item name="android:navigationBarColor">#000000</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

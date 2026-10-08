@@ -1,4 +1,4 @@
-# Android foundation setup
+# Android setup
 
 TuneStash is a two-crate Rust workspace. `music_core` builds on a host without
 Android dependencies. The `music_app` binary is enabled by its `mobile` feature
@@ -11,6 +11,15 @@ and uses the Dioxus 0.7.10 Android WebView renderer.
   `cargo install dioxus-cli --version 0.7.10 --locked` if absent.
 - JDK 17, Android SDK and NDK, and the Android SDK build tools.
 - ARM64 Rust target: `rustup target add aarch64-linux-android`.
+- CMake, Ninja, Perl, `make`, and `gperf` for the pinned TDLib/OpenSSL build.
+
+## Telegram app credentials
+
+Create a Telegram application at [my.telegram.org](https://my.telegram.org),
+then copy `.env.example` to `.env` and fill in `TELEGRAM_API_ID` and
+`TELEGRAM_API_HASH`. The build reads this ignored file. Never commit it or
+enter authorization codes or passwords outside the Android app. These app
+credentials are compiled into the independent Telegram client.
 
 Set these variables to your local installations before running `dx`:
 
@@ -18,6 +27,7 @@ Set these variables to your local installations before running `dx`:
 export JAVA_HOME=/path/to/jdk-17
 export ANDROID_HOME=/path/to/Android/Sdk
 export NDK_HOME="$ANDROID_HOME/ndk/<installed-version>"
+export ANDROID_NDK_HOME="$NDK_HOME"
 export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$PATH"
 ```
 
@@ -33,8 +43,11 @@ cargo check -p music_app --target aarch64-linux-android --features mobile --lock
 ```
 
 The script checks JDK 17, SDK platform 34, the NDK, Rust's ARM64 target, and
-Dioxus CLI 0.7.10, then builds with the committed `Cargo.lock`. It prints the
-resulting APK path.
+Dioxus CLI 0.7.10. On the first build it fetches pinned TDLib and OpenSSL
+sources into ignored `target/native/`, builds ARM64 `libtdjson.so`, then bundles
+the APK. Later builds reuse the native library. It overlays the source-controlled
+splash resources and native library onto Dioxus's generated Gradle project,
+assembles the final APK, and prints its path.
 
 The debug APK is at
 `target/dx/TuneStash/debug/android/app/app/build/outputs/apk/debug/app-debug.apk`.
@@ -52,13 +65,14 @@ The install script selects the only authorized device automatically when no
 serial is passed. For multiple devices, pass the serial as its argument or set
 `ANDROID_SERIAL` in the environment; set `ANDROID_USER_ID` to install into a
 profile other than user 0. The script launches the app after installation. The
-smoke test should show `Status: ok`, a live process, and a blank `#171a19` page
-in the screenshot.
+smoke test should show `Status: ok`, a live process, and the TuneStash splash
+mark followed by the login screen. An already authorized session opens the
+blank dark canvas.
 
-The blank page is `music_app::ui::App` and `BlankPage`; its CSS is in
-`crates/music_app/assets/style.css`. Components are Rust functions returning
-`Element`, and `rsx!` describes their WebView markup. The `mobile` Cargo
-feature keeps platform dependencies out of the default host checks. No
-application runtime services or authentication state are started yet.
+The login and input screens are in `music_app::ui::App`; their CSS is in
+`crates/music_app/assets/style.css`. TDLib runs on a dedicated Rust thread,
+and Dioxus observes authorization snapshots. Android Keystore protects the
+local TDLib database key. Host tests do not prove a real account login; verify
+that separately on an Android device.
 The Cargo binary is named `TuneStash` because Dioxus derives the Android
 launcher label from that name.

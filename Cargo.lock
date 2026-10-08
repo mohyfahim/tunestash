@@ -2511,8 +2511,14 @@ dependencies = [
 name = "music_app"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "dioxus",
+ "jni 0.21.1",
+ "libloading 0.8.9",
  "music_core",
+ "ndk-context",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
