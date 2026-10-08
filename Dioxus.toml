@@ -1,0 +1,12 @@
+[application]
+name = "TuneStash"
+sub_package = "music_app"
+asset_dir = "crates/music_app/assets"
+android_main_activity = "android/MainActivity.kt"
+
+[bundle]
+identifier = "com.tunestash.app"
+category = "Music"
+
+[android]
+icon = ["android/icons/tunestash-512.png"]

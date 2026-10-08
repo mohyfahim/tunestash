@@ -1,0 +1,31 @@
+[package]
+name = "music_app"
+description = "TuneStash application shell: UI, runtime, and platform adapters."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "TuneStash"
+path = "src/main.rs"
+required-features = ["mobile"]
+
+[features]
+default = []
+mobile = ["dep:dioxus", "dioxus/mobile"]
+
+[dependencies]
+music_core = { path = "../music_core" }
+dioxus = { version = "=0.7.10", default-features = false, features = ["minimal", "asset", "document"], optional = true }
+serde_json = "1"
+base64 = "0.22"
+libloading = "0.8"
+tokio = { version = "1", features = ["sync"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+
+[lints]
+workspace = true
