@@ -54,6 +54,10 @@ Updated: 2026-10-09
   pagination, section placement, account-scoped persistence, and the different
   persistence outcomes for empty and failed scans. The Android target passes
   Clippy with warnings denied and the APK builds successfully.
+- Host tests now cover live rescans and newly listed chats after discovery
+  completes. Their checks continue in the background without reopening the
+  checking-music banner. The rebuilt APK was installed on Samsung SM-A256E;
+  after the 636-chat scan finished, the banner was absent on two device checks.
 - Samsung SM-A256E, Android 14: the music-only APK installed and scanned live
   Telegram history progressively. Saved Messages, Gym Musics (a created
   channel), and Spotify Save Bot appeared after music was confirmed. The

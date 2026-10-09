@@ -409,8 +409,9 @@ impl SourceEngine {
             self.queue_probe(chat_id);
             if self.initial_complete {
                 self.snapshot.show_partial = true;
+            } else {
+                self.snapshot.stage = DiscoveryStage::CheckingMusic;
             }
-            self.snapshot.stage = DiscoveryStage::CheckingMusic;
             self.refresh_progress();
             self.publish();
         }
@@ -853,7 +854,11 @@ impl SourceEngine {
             .failed_chats
             .retain(|failure| failure.chat_id != chat_id);
         self.queue_probe(chat_id);
-        self.snapshot.stage = DiscoveryStage::CheckingMusic;
+        // Live message edits and deletions can trigger a quick recheck after
+        // discovery is complete. Keep the page stable while that check runs.
+        if self.snapshot.stage != DiscoveryStage::Complete {
+            self.snapshot.stage = DiscoveryStage::CheckingMusic;
+        }
         self.snapshot.show_partial = true;
         self.refresh_progress();
         self.publish();
@@ -1248,6 +1253,60 @@ mod tests {
         assert!(engine.snapshot.chats.iter().any(|chat| chat.chat_id == 10));
         engine.update_list_membership(10, &json!({"@type":"chatListArchive"}), false);
         assert!(!engine.snapshot.chats.iter().any(|chat| chat.chat_id == 10));
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn live_rescan_does_not_reopen_completed_discovery() {
+        let (mut engine, path) = selected_engine("live-rescan");
+        engine.snapshot.stage = DiscoveryStage::Complete;
+        engine.initial_complete = true;
+        engine.refresh_progress();
+
+        engine.rescan_chat(42);
+
+        assert_eq!(engine.snapshot.stage, DiscoveryStage::Complete);
+        assert_eq!(
+            (engine.snapshot.checked_chats, engine.snapshot.total_chats),
+            (0, 1)
+        );
+        assert!(engine.jobs.iter().any(|job| job.chat_id() == Some(42)));
+        engine.mark_found(42, 99);
+        assert_eq!(engine.snapshot.stage, DiscoveryStage::Complete);
+        assert_eq!(
+            (engine.snapshot.checked_chats, engine.snapshot.total_chats),
+            (1, 1)
+        );
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn newly_listed_chat_does_not_reopen_completed_discovery() {
+        let (mut engine, path) = selected_engine("new-chat");
+        engine.snapshot.stage = DiscoveryStage::Complete;
+        engine.initial_complete = true;
+        engine.lists_ready = true;
+        engine.main_ids.insert(43);
+        engine.chats.insert(
+            43,
+            ChatMeta {
+                title: "New chat".into(),
+                subtitle: "Group chat".into(),
+                private_user: None,
+                supergroup: None,
+            },
+        );
+
+        engine.include_cached_chat(43);
+
+        assert_eq!(engine.snapshot.stage, DiscoveryStage::Complete);
+        assert_eq!(
+            (engine.snapshot.checked_chats, engine.snapshot.total_chats),
+            (1, 2)
+        );
+        assert!(engine.jobs.iter().any(|job| job.chat_id() == Some(43)));
         drop(engine);
         let _ = std::fs::remove_file(path);
     }
