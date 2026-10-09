@@ -121,8 +121,15 @@ pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
                 div { class: "sources-layout",
                     header { class: "sources-header",
                         div { class: "sources-brand", img { class: "sources-brand-mark", src: NOTE, alt: "" } span { "Tune" span { "Stash" } } }
-                        h1 { "Music Sources" }
-                        p { "Choose where TuneStash will find music. Your choices are saved for indexing later." }
+                        div { class: "sources-title-row",
+                            h1 { "Music Sources" }
+                            button { class: "source-resync", r#type: "button",
+                                disabled: matches!(snapshot.stage, DiscoveryStage::Waiting | DiscoveryStage::LoadingChats | DiscoveryStage::CheckingMusic) || snapshot.signing_out,
+                                onclick: move |_| dispatch(SourceCommand::Resync, error),
+                                "Resync"
+                            }
+                        }
+                        p { "Choose where TuneStash will find music. Resync when you want to check Telegram again." }
                     }
                     if onboarding {
                         div { class: "connected-account",

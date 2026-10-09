@@ -124,7 +124,7 @@ Resolve Saved Messages using the authenticated account. List/select accessible c
 
 Read newest audio first using supported filtered search/history APIs, and also account for audio sent as Documents. Persist separate cursors when multiple scans are used. Reconcile by message key. Filter voice notes, links, and unsupported content explicitly.
 
-Keep pagination and live updates separate. Apply edits/deletions, deduplicate overlapping pages, reconcile recent history after reconnect, and perform repair scans when needed. A short result page alone is not a universal end-of-history signal; follow the pinned API's pagination semantics. Respect rate-limit retry times and use bounded concurrency across sources.
+Keep pagination and live updates separate during an active source scan. Persist the completed source catalog and its success marker in one transaction. On later launches, restore that catalog without scanning again. Ignore subsequent source-discovery updates until the user chooses Resync; that command performs a full scan and replaces the saved catalog only on success. Deduplicate overlapping pages and apply edits/deletions observed during an active scan. A short result page alone is not a universal end-of-history signal; follow the pinned API's pagination semantics. Respect rate-limit retry times and use bounded concurrency across sources.
 
 Telegram proxy settings are adapter configuration. The official Telegram app's working connection does not imply that this independent session inherits its proxy configuration.
 

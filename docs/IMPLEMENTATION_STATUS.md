@@ -26,7 +26,12 @@ Updated: 2026-10-09
   in Default Sources. A complete music check that finds no qualifying file
   disables a previously saved choice; failed checks preserve it and keep the
   chat hidden until verification succeeds. New music messages and relevant
-  edits or deletions update eligibility.
+  edits or deletions affect eligibility during an active scan.
+- A successful source scan now saves the discovered catalog in SQLite. Later
+  launches load that catalog without scanning Telegram; live source updates are
+  ignored until the user taps Resync. Resync runs a full scan and replaces the
+  saved catalog only after success. A failed resync restores the last saved
+  list. Existing installations perform one scan to create this new catalog.
 - A Change account confirmation starts TDLib logout, clears the account's
   source choices after TDLib closes, and creates a fresh TDLib client for the
   next login. It is only exposed during onboarding.
@@ -54,10 +59,16 @@ Updated: 2026-10-09
   pagination, section placement, account-scoped persistence, and the different
   persistence outcomes for empty and failed scans. The Android target passes
   Clippy with warnings denied and the APK builds successfully.
-- Host tests now cover live rescans and newly listed chats after discovery
-  completes. Their checks continue in the background without reopening the
-  checking-music banner. The rebuilt APK was installed on Samsung SM-A256E;
-  after the 636-chat scan finished, the banner was absent on two device checks.
+- An earlier fix kept background checks from reopening the checking-music
+  banner. Its APK was installed on Samsung SM-A256E; after the 636-chat scan
+  finished, the banner was absent on two device checks. The current build
+  instead waits for a manual Resync after a successful scan.
+- Host tests cover catalog migration, atomic replacement, cold-launch restore,
+  and manual resync. The new APK was installed on Samsung SM-A256E. A cold
+  relaunch showed the saved source page and an enabled Resync button immediately,
+  with no automatic checking banner. Tapping Resync advanced the on-device
+  source database's modification time, confirming the manual scan saved a new
+  result. The scan progress itself was too brief to capture in a screenshot.
 - Samsung SM-A256E, Android 14: the music-only APK installed and scanned live
   Telegram history progressively. Saved Messages, Gym Musics (a created
   channel), and Spotify Save Bot appeared after music was confirmed. The

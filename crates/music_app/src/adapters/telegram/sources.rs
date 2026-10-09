@@ -76,7 +76,6 @@ pub struct SourceEngine {
     active: Option<(i64, Job, Instant)>,
     next_extra: i64,
     logout_account: Option<i64>,
-    initial_complete: bool,
     scan_epochs: BTreeMap<i64, u64>,
     proof_messages: BTreeMap<i64, i64>,
 }
@@ -103,7 +102,6 @@ impl SourceEngine {
             active: None,
             next_extra: 1000,
             logout_account: None,
-            initial_complete: false,
             scan_epochs: BTreeMap::new(),
             proof_messages: BTreeMap::new(),
         }
@@ -114,6 +112,15 @@ impl SourceEngine {
     }
 
     fn fail(&mut self, message: &str) {
+        // A failed manual resync must not strand the user on an empty source
+        // list when a successful catalog was already saved.
+        if let (Some(store), Some(account)) = (&self.store, self.snapshot.account_id)
+            && let Ok(Some(chats)) = store.load_discovery(account)
+        {
+            self.snapshot.chats = chats;
+            self.snapshot.show_partial = true;
+            self.refresh_progress();
+        }
         self.snapshot.stage = DiscoveryStage::Failed;
         self.snapshot.error = Some(message.into());
         self.jobs.clear();
@@ -138,19 +145,39 @@ impl SourceEngine {
         self.jobs.clear();
         self.active = None;
         self.chats.remove(&user_id);
-        self.add_chat(SourceChat {
+        let saved_messages = SourceChat {
             chat_id: user_id,
             title: "Saved Messages".into(),
             subtitle: "Your personal Telegram archive".into(),
             kind: SourceKind::SavedMessages,
             selected: false,
             music: MusicCheck::Unchecked,
-        });
-        if self.store.is_none() {
-            self.fail("Source storage is unavailable. Restart the app after freeing device space.");
-            return;
+        };
+        let cached = match self.store.as_ref() {
+            Some(store) => store.load_discovery(user_id),
+            None => {
+                self.fail(
+                    "Source storage is unavailable. Restart the app after freeing device space.",
+                );
+                return;
+            }
+        };
+        match cached {
+            Ok(Some(chats)) => {
+                self.snapshot.chats = chats;
+                self.snapshot.stage = DiscoveryStage::Complete;
+                self.snapshot.show_partial = true;
+                self.refresh_progress();
+                self.publish();
+            }
+            Ok(None) => {
+                self.add_chat(saved_messages);
+                self.restart(td);
+            }
+            Err(_) => {
+                self.fail("Can't read saved source discovery. Check device storage and retry.")
+            }
         }
-        self.restart(td);
     }
 
     fn add_chat(&mut self, mut chat: SourceChat) {
@@ -192,7 +219,6 @@ impl SourceEngine {
     fn restart(&mut self, _td: &TdJson) {
         self.jobs.clear();
         self.active = None;
-        self.initial_complete = false;
         self.lists_ready = false;
         self.main_ids.clear();
         self.archive_ids.clear();
@@ -264,6 +290,17 @@ impl SourceEngine {
                     self.restart(td);
                 }
             }
+            SourceCommand::Resync => {
+                if self.snapshot.account_id.is_some()
+                    && self.logout_account.is_none()
+                    && !matches!(
+                        self.snapshot.stage,
+                        DiscoveryStage::LoadingChats | DiscoveryStage::CheckingMusic
+                    )
+                {
+                    self.restart(td);
+                }
+            }
             SourceCommand::ContinuePartial => {
                 self.snapshot.show_partial = true;
                 self.publish();
@@ -295,7 +332,7 @@ impl SourceEngine {
 
     pub fn signed_out(&mut self) {
         if let Some(account) = self.logout_account.take()
-            && let Some(store) = &self.store
+            && let Some(store) = &mut self.store
         {
             let _ = store.clear_account(account);
         }
@@ -391,12 +428,7 @@ impl SourceEngine {
             selected: false,
             music: MusicCheck::Unchecked,
         });
-        if is_new
-            && matches!(
-                self.snapshot.stage,
-                DiscoveryStage::CheckingMusic | DiscoveryStage::Complete
-            )
-        {
+        if is_new && self.snapshot.stage == DiscoveryStage::CheckingMusic {
             if let Some(user_id) = meta.private_user {
                 self.jobs.push_back(Job::User { chat_id, user_id });
             }
@@ -407,17 +439,33 @@ impl SourceEngine {
                 });
             }
             self.queue_probe(chat_id);
-            if self.initial_complete {
-                self.snapshot.show_partial = true;
-            } else {
-                self.snapshot.stage = DiscoveryStage::CheckingMusic;
-            }
             self.refresh_progress();
             self.publish();
         }
     }
 
     pub fn handle_value(&mut self, _td: &TdJson, value: &Value) -> bool {
+        // Source discovery runs only for the first scan or an explicit resync.
+        // TDLib keeps sending live chat/message updates after that; consuming
+        // them here must not start another source check.
+        if !matches!(
+            self.snapshot.stage,
+            DiscoveryStage::LoadingChats | DiscoveryStage::CheckingMusic
+        ) && matches!(
+            value["@type"].as_str(),
+            Some(
+                "updateChatPosition"
+                    | "updateChatAddedToList"
+                    | "updateChatRemovedFromList"
+                    | "updateNewChat"
+                    | "updateChatTitle"
+                    | "updateNewMessage"
+                    | "updateMessageContent"
+                    | "updateDeleteMessages"
+            )
+        ) {
+            return true;
+        }
         if value["@type"] == "updateChatPosition" {
             if let Some(chat_id) = value["chat_id"].as_i64() {
                 let present = value["position"]["order"]
@@ -854,11 +902,7 @@ impl SourceEngine {
             .failed_chats
             .retain(|failure| failure.chat_id != chat_id);
         self.queue_probe(chat_id);
-        // Live message edits and deletions can trigger a quick recheck after
-        // discovery is complete. Keep the page stable while that check runs.
-        if self.snapshot.stage != DiscoveryStage::Complete {
-            self.snapshot.stage = DiscoveryStage::CheckingMusic;
-        }
+        self.snapshot.stage = DiscoveryStage::CheckingMusic;
         self.snapshot.show_partial = true;
         self.refresh_progress();
         self.publish();
@@ -1001,7 +1045,13 @@ impl SourceEngine {
     }
 
     pub fn drive(&mut self, td: &TdJson) {
-        if self.logout_account.is_some() || self.snapshot.account_id.is_none() {
+        if self.logout_account.is_some()
+            || self.snapshot.account_id.is_none()
+            || !matches!(
+                self.snapshot.stage,
+                DiscoveryStage::LoadingChats | DiscoveryStage::CheckingMusic
+            )
+        {
             return;
         }
         if let Some((_, job, started)) = &self.active {
@@ -1062,8 +1112,21 @@ impl SourceEngine {
         };
         let Some(job) = job else {
             if self.snapshot.stage == DiscoveryStage::CheckingMusic {
+                if self.snapshot.failed_checks == 0 {
+                    let Some(account) = self.snapshot.account_id else {
+                        return;
+                    };
+                    let saved = self.store.as_mut().is_some_and(|store| {
+                        store.save_discovery(account, &self.snapshot.chats).is_ok()
+                    });
+                    if !saved {
+                        self.fail(
+                            "Couldn't save discovered sources. Check device storage and retry.",
+                        );
+                        return;
+                    }
+                }
                 self.snapshot.stage = DiscoveryStage::Complete;
-                self.initial_complete = true;
                 self.snapshot.show_partial = true;
                 self.publish();
             }
@@ -1258,55 +1321,72 @@ mod tests {
     }
 
     #[test]
-    fn live_rescan_does_not_reopen_completed_discovery() {
-        let (mut engine, path) = selected_engine("live-rescan");
-        engine.snapshot.stage = DiscoveryStage::Complete;
-        engine.initial_complete = true;
+    fn completed_discovery_survives_restart_without_a_new_scan() {
+        let (mut engine, path) = selected_engine("restore-discovery");
+        engine.snapshot.stage = DiscoveryStage::CheckingMusic;
         engine.refresh_progress();
-
-        engine.rescan_chat(42);
-
+        engine.drive(&TdJson);
         assert_eq!(engine.snapshot.stage, DiscoveryStage::Complete);
-        assert_eq!(
-            (engine.snapshot.checked_chats, engine.snapshot.total_chats),
-            (0, 1)
+        drop(engine);
+
+        let (updates, _) = watch::channel(SourceSnapshot::default());
+        let mut restored = SourceEngine::new(path.to_str().unwrap(), updates);
+        restored.authorized(&TdJson, 7, &json!({"first_name":"Test"}));
+        assert_eq!(restored.snapshot.stage, DiscoveryStage::Complete);
+        assert!(restored.jobs.is_empty());
+        assert!(restored.snapshot.chats[0].selected);
+        assert_eq!(restored.snapshot.chats[0].music, MusicCheck::Found);
+        drop(restored);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn live_updates_wait_for_manual_resync_after_completion() {
+        let (mut engine, path) = selected_engine("manual-resync");
+        engine.snapshot.stage = DiscoveryStage::Complete;
+        engine.lists_ready = true;
+        engine.main_ids.insert(43);
+        engine.handle_value(
+            &TdJson,
+            &json!({"@type":"updateNewChat","chat":{
+                "id":43,"title":"New chat","type":{"@type":"chatTypeBasicGroup"}
+            }}),
         );
-        assert!(engine.jobs.iter().any(|job| job.chat_id() == Some(42)));
-        engine.mark_found(42, 99);
+        engine.handle_value(
+            &TdJson,
+            &json!({"@type":"updateNewMessage","message":{
+                "chat_id":42,"id":100,"content":{"@type":"messageAudio"}
+            }}),
+        );
         assert_eq!(engine.snapshot.stage, DiscoveryStage::Complete);
-        assert_eq!(
-            (engine.snapshot.checked_chats, engine.snapshot.total_chats),
-            (1, 1)
-        );
+        assert_eq!(engine.snapshot.chats.len(), 1);
+        assert!(engine.jobs.is_empty());
+
+        engine.handle_command(&TdJson, SourceCommand::Resync);
+        assert_eq!(engine.snapshot.stage, DiscoveryStage::LoadingChats);
+        assert!(matches!(engine.jobs.front(), Some(Job::LoadMain)));
         drop(engine);
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn newly_listed_chat_does_not_reopen_completed_discovery() {
-        let (mut engine, path) = selected_engine("new-chat");
-        engine.snapshot.stage = DiscoveryStage::Complete;
-        engine.initial_complete = true;
-        engine.lists_ready = true;
-        engine.main_ids.insert(43);
-        engine.chats.insert(
-            43,
-            ChatMeta {
-                title: "New chat".into(),
-                subtitle: "Group chat".into(),
-                private_user: None,
-                supergroup: None,
-            },
-        );
+    fn failed_manual_resync_restores_last_completed_catalog() {
+        let (mut engine, path) = selected_engine("failed-resync");
+        engine.snapshot.stage = DiscoveryStage::CheckingMusic;
+        engine.refresh_progress();
+        engine.drive(&TdJson);
+        engine.handle_command(&TdJson, SourceCommand::Resync);
+        assert!(engine.snapshot.selected_chats().next().is_none());
 
-        engine.include_cached_chat(43);
+        engine.fail("Telegram is unavailable.");
 
-        assert_eq!(engine.snapshot.stage, DiscoveryStage::Complete);
+        assert_eq!(engine.snapshot.stage, DiscoveryStage::Failed);
+        assert!(engine.snapshot.show_partial);
+        assert_eq!(engine.snapshot.selected_chats().count(), 1);
         assert_eq!(
-            (engine.snapshot.checked_chats, engine.snapshot.total_chats),
-            (1, 2)
+            engine.snapshot.error.as_deref(),
+            Some("Telegram is unavailable.")
         );
-        assert!(engine.jobs.iter().any(|job| job.chat_id() == Some(43)));
         drop(engine);
         let _ = std::fs::remove_file(path);
     }

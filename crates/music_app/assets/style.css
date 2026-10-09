@@ -97,6 +97,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--lime); outl
 .sources-brand-mark { display: block; width: 27px; height: 27px; border-radius: 8px; }
 .source-expand { display: block; width: 100%; min-height: 46px; margin-top: 5px; padding: 10px 4px; border: 0; background: none; color: var(--source-violet); font-size: 13px; font-weight: 700; text-align: left; }
 .sources-header h1 { margin: 0 0 10px; font-size: clamp(30px, 8vw, 38px); line-height: 1.1; letter-spacing: -.03em; }
+.sources-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.sources-title-row h1 { min-width: 0; margin: 0; }
+.source-resync { flex: none; min-height: 44px; padding: 8px 14px; border: 1px solid var(--source-border); border-radius: 12px; background: var(--source-surface-raised); color: var(--source-accent); font-size: 14px; font-weight: 700; }
+.source-resync:disabled { opacity: .5; cursor: default; }
+.source-resync:focus-visible { outline: 2px solid var(--source-accent); outline-offset: 2px; }
 .sources-header p { max-width: 42ch; margin: 0; color: var(--source-secondary); font-size: 15px; line-height: 1.5; }
 .connected-account { display: flex; align-items: center; gap: 13px; min-height: 78px; padding: 12px 14px; border-radius: 16px; background: var(--source-surface-raised); }
 .connected-icon { display: grid; place-items: center; flex: none; width: 46px; height: 46px; border-radius: 13px; background: #32a8ee; color: white; }

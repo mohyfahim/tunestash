@@ -98,7 +98,7 @@ Use an original, dark-first visual design. Familiar music-player patterns are we
 - Deleting an offline download affects local storage only. It does not delete the Telegram message.
 - Exact duplicate-file grouping is conservative. Matching artist/title alone is insufficient, particularly for live performances, remixes, and different quality versions.
 - A remote deletion or loss of access can prevent future downloading. The product does not promise permanent availability. Content restrictions and ephemeral-media requirements remain authoritative.
-- Auto-sync runs on app activation and through active connections when permitted. Continuous archive synchronization while the app is closed is not promised, especially on iOS.
+- Source discovery runs automatically for a newly connected account until one full scan succeeds. After that, the saved source list remains available across launches and changes only when the user chooses Resync. Continuous archive synchronization while the app is closed is not promised, especially on iOS.
 - Playlists are device-local in phase 1. Signing into the same Telegram account on another device does not automatically synchronize product playlists.
 - Logout stops playback and transfers, ends the session, and clears account-scoped local data and media. Confirm the local-data consequence in the UI before logout. Never delete remote content as part of logout.
 

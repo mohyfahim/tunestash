@@ -137,6 +137,7 @@ impl Default for SourceSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceCommand {
     SetSelected { chat_id: i64, selected: bool },
+    Resync,
     RetryDiscovery,
     ContinuePartial,
     LoadMore,
