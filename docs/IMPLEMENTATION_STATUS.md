@@ -98,6 +98,12 @@ Updated: 2026-10-09
   message ID. Discovery now uses TDLib's returned `next_from_message_id`;
   a repeat scan on the device finished without failed checks. Failed checks,
   if any occur later, can be expanded to show the chat and Telegram error.
+- Source discovery now emits aggregate Android timing logs. Two 636-chat
+  resyncs took 80 and 83 seconds with one-item Audio pages; empty paginated
+  results caused up to 199 requests for one chat. A 50-item Audio page reduced
+  a repeat scan to 20 seconds with the same 123 Audio and 14 Document sources
+  found. Measurements and the logcat command are in
+  [SOURCE_SCAN_PERFORMANCE.md](SOURCE_SCAN_PERFORMANCE.md).
 - On that device, a temporary Saved Messages selection survived a force-stop
   and cold relaunch. A temporary regular chat moved from All Chats to Selected
   Chats on selection. Both test choices were returned to their original off
@@ -114,9 +120,9 @@ Updated: 2026-10-09
   layout from `concept/library.png`. Home and Search are black placeholders
   with persistent dark bottom navigation and dark Android system bars.
   Category, download, and sorting controls are displayed without active
-  behavior. The mini-player stays hidden until playback exists. Reindex is a
-  manual action in the Library title row, disabled without selected sources or
-  while indexing.
+  behavior. The mini-player stays hidden until playback exists. The icon-only
+  Reindex action sits in the Library title row and is disabled without selected
+  sources or while indexing.
 - Selected Telegram sources receive metadata-only Audio and playable audio
   Document scans. Indexed rows persist by account, chat, and message ID;
   per-filter cursors and each result page commit together. A completed scan
@@ -125,19 +131,24 @@ Updated: 2026-10-09
   new full pass. Live new-message, edit, and deletion updates
   refresh the catalog while the app is open. Source discovery checks Document
   history after an empty Audio search so document-only chats can qualify.
-- The list shows actual track count, title, artist, source, and embedded
-  minithumbnail where available. Missing artwork uses the TuneStash music mark.
-  The service thread owns SQLite and publishes paginated UI snapshots.
+- The list shows the current matching track count, title, artist, source, and
+  embedded minithumbnail where available. Tracks are ordered by displayed
+  title; the A–Z rail filters case-insensitively by its first letter, and
+  tapping the active letter restores all tracks. Persian and numeric titles
+  stay in the full list. Missing artwork uses the TuneStash music mark. The
+  service thread owns SQLite and publishes paginated UI snapshots.
 
 Host tests cover parsing, account/source filtering, first indexing, cursor
-resume, completed-catalog startup, manual Reindex, duplicate prevention, and
-reconciliation. Formatting, host tests, host Clippy, Android-target Rust
-checks, and the APK build pass. The updated APK installed on Samsung SM-A256E
-(Android 14). Its dark empty Library, disabled Reindex button, black Home and
-Search placeholders, bottom navigation, and dark system bars were inspected.
-The device currently shows zero tracks and no selected sources. A populated
-Library, a live Reindex with a selected source, and a cold restart with indexed
-tracks remain unverified. No private account database was inspected.
+resume, completed-catalog startup, manual Reindex, duplicate prevention,
+reconciliation, title ordering, pagination, and active-letter filtering.
+Formatting, host tests, host Clippy, Android-target Rust checks, and the APK
+build pass. The updated APK installed on Samsung SM-A256E (Android 14). Its
+populated dark Library showed 383 tracks in title order and the icon-only
+Reindex action. A, B, Q, and X filters showed 15, 22, 1, and 0 matching tracks;
+tapping an active letter restored the full list. The rail stayed visible while
+scrolling, and its lower letters were reachable by scrolling the rail. A cold
+relaunch restored the 383-track catalog. A live Reindex was not exercised.
+No private account database was inspected.
 Playback, streaming, offline downloads, and the Settings entry point remain
 future work.
 

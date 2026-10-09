@@ -232,14 +232,21 @@ impl LibraryStore {
         ).map(|_| ()).map_err(|e| e.to_string())
     }
 
-    pub fn page(&self, account: i64, limit: usize) -> Result<(Vec<TrackSummary>, usize), String> {
+    pub fn page(
+        &self,
+        account: i64,
+        limit: usize,
+        initial: Option<char>,
+    ) -> Result<(Vec<TrackSummary>, usize), String> {
+        let initial = initial.map(|letter| letter.to_string());
         let total: i64 = self
             .connection
             .query_row(
                 "SELECT count(*) FROM indexed_tracks AS tracks JOIN source_choices AS choices
              ON choices.account_id = tracks.account_id AND choices.chat_id = tracks.chat_id
-             WHERE tracks.account_id = ?1 AND choices.enabled = 1",
-                [account],
+             WHERE tracks.account_id = ?1 AND choices.enabled = 1
+               AND (?2 IS NULL OR substr(tracks.title, 1, 1) COLLATE NOCASE = ?2)",
+                params![account, initial],
                 |row| row.get(0),
             )
             .map_err(|e| e.to_string())?;
@@ -252,12 +259,13 @@ impl LibraryStore {
              FROM indexed_tracks AS tracks JOIN source_choices AS choices
               ON choices.account_id = tracks.account_id AND choices.chat_id = tracks.chat_id
              WHERE tracks.account_id = ?1 AND choices.enabled = 1
-             ORDER BY tracks.message_date DESC, tracks.chat_id DESC, tracks.message_id DESC
-             LIMIT ?2",
+               AND (?2 IS NULL OR substr(tracks.title, 1, 1) COLLATE NOCASE = ?2)
+             ORDER BY tracks.title COLLATE NOCASE ASC, tracks.chat_id ASC, tracks.message_id ASC
+             LIMIT ?3",
             )
             .map_err(|e| e.to_string())?;
         let tracks = statement
-            .query_map(params![account, limit as i64], |row| {
+            .query_map(params![account, initial, limit as i64], |row| {
                 Ok(TrackSummary {
                     chat_id: row.get(0)?,
                     message_id: row.get(1)?,
@@ -344,9 +352,9 @@ mod tests {
         store
             .save_page(1, 10, MediaFilter::Document, 0, &[])
             .unwrap();
-        let (rows, total) = store.page(1, 1).unwrap();
+        let (rows, total) = store.page(1, 1, None).unwrap();
         assert_eq!(total, 2);
-        assert_eq!(rows[0].message_id, 3);
+        assert_eq!(rows[0].message_id, 2);
         assert_eq!(rows[0].source_name, "Saved Messages");
         assert!(store.start_source(1, 10, false).unwrap().is_empty());
         assert_eq!(
@@ -356,11 +364,11 @@ mod tests {
         store
             .save_page(1, 10, MediaFilter::Audio, 0, &[track(2)])
             .unwrap();
-        assert_eq!(store.page(1, 50).unwrap().1, 2); // Old rows stay visible during a scan.
+        assert_eq!(store.page(1, 50, None).unwrap().1, 2); // Old rows stay visible during a scan.
         store
             .save_page(1, 10, MediaFilter::Document, 0, &[])
             .unwrap();
-        let (rows, total) = store.page(1, 50).unwrap();
+        let (rows, total) = store.page(1, 50, None).unwrap();
         assert_eq!(total, 1);
         assert_eq!(rows[0].message_id, 2);
         std::fs::remove_file(path).unwrap();
@@ -373,8 +381,10 @@ mod tests {
         store
             .save_page(1, 10, MediaFilter::Audio, 0, &[track(1)])
             .unwrap();
-        assert_eq!(store.page(1, 50).unwrap().1, 1);
-        assert_eq!(store.page(2, 50).unwrap().1, 0);
+        assert_eq!(store.page(1, 50, None).unwrap().1, 1);
+        assert_eq!(store.page(2, 50, None).unwrap().1, 0);
+        assert_eq!(store.page(1, 50, Some('S')).unwrap().1, 1);
+        assert_eq!(store.page(2, 50, Some('S')).unwrap().1, 0);
         let source = SourceStore::open(&path).unwrap();
         source
             .set_selected(
@@ -390,7 +400,49 @@ mod tests {
                 false,
             )
             .unwrap();
-        assert_eq!(store.page(1, 50).unwrap().1, 0);
+        assert_eq!(store.page(1, 50, None).unwrap().1, 0);
+        assert_eq!(store.page(1, 50, Some('S')).unwrap().1, 0);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn title_order_and_letter_filter_are_stable_across_pages() {
+        let (path, mut store) = fixture();
+        store.start_source(1, 10, false).unwrap();
+        let mut tracks = Vec::new();
+        for (id, title) in [
+            (8, "Beta"),
+            (5, "alpha"),
+            (2, "Alpha"),
+            (9, "آهنگ"),
+            (7, "2 Steps"),
+        ] {
+            let mut item = track(id);
+            item.title = title.into();
+            tracks.push(item);
+        }
+        store
+            .save_page(1, 10, MediaFilter::Audio, 0, &tracks)
+            .unwrap();
+        let (first_page, count) = store.page(1, 2, None).unwrap();
+        assert_eq!(count, 5);
+        assert_eq!(
+            first_page
+                .iter()
+                .map(|row| row.message_id)
+                .collect::<Vec<_>>(),
+            vec![7, 2]
+        );
+        let (second_page, count) = store.page(1, 3, None).unwrap();
+        assert_eq!(count, 5);
+        assert_eq!(second_page[2].message_id, 5);
+        let (a_page, a_count) = store.page(1, 1, Some('A')).unwrap();
+        assert_eq!(a_count, 2);
+        assert_eq!(a_page[0].message_id, 2);
+        let (a_page, _) = store.page(1, 2, Some('A')).unwrap();
+        assert_eq!(a_page[1].message_id, 5);
+        assert_eq!(store.page(1, 50, Some('Z')).unwrap().1, 0);
+        assert_eq!(store.page(1, 50, Some('2')).unwrap().1, 1);
         std::fs::remove_file(path).unwrap();
     }
 }

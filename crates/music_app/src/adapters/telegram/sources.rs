@@ -15,9 +15,49 @@ use tokio::sync::watch;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
 // Overlap music searches so empty chats do not wait one-by-one.
 const MAX_INFLIGHT: usize = 8;
-// Audio filter returns only audio, so one hit is enough to qualify a chat.
-const AUDIO_SEARCH_LIMIT: i32 = 1;
+// Empty filtered pages can still return another cursor. A one-item limit made
+// some chats require hundreds of round trips before reaching the end.
+const AUDIO_SEARCH_LIMIT: i32 = 50;
 const DOCUMENT_SEARCH_LIMIT: i32 = 50;
+const SCAN_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
+// Aggregate only counts and timings. Chat names, IDs, messages, and Telegram
+// error text can contain private data and must stay out of diagnostic logs.
+#[derive(Default)]
+struct ScanStats {
+    requests: u64,
+    audio_requests: u64,
+    audio_messages: u64,
+    audio_nonplayable: u64,
+    audio_next_pages: u64,
+    max_audio_pages_per_chat: u64,
+    document_requests: u64,
+    document_messages: u64,
+    audio_found: u64,
+    document_found: u64,
+    audio_exhausted: u64,
+    document_exhausted: u64,
+    timeouts: u64,
+    flood_waits: u64,
+    request_ms: u64,
+    slowest_ms: u64,
+}
+
+#[cfg(target_os = "android")]
+fn scan_log(message: &str) {
+    use std::ffi::{CString, c_char};
+    #[link(name = "log")]
+    unsafe extern "C" {
+        fn __android_log_write(priority: i32, tag: *const c_char, text: *const c_char) -> i32;
+    }
+    if let Ok(message) = CString::new(message) {
+        // Android's INFO priority is 4.
+        unsafe { __android_log_write(4, c"TuneStashScan".as_ptr(), message.as_ptr()) };
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn scan_log(_message: &str) {}
 
 #[derive(Clone)]
 enum Job {
@@ -63,6 +103,22 @@ fn flood_wait_secs(message: &str) -> Option<u64> {
 }
 
 impl Job {
+    fn log_kind(&self) -> &'static str {
+        match self {
+            Self::LoadMain | Self::LoadArchive => "load_chats",
+            Self::ListMain | Self::ListArchive => "list_chats",
+            Self::GetChat { .. } => "get_chat",
+            Self::User { .. } => "get_user",
+            Self::Channel { .. } => "get_supergroup",
+            Self::Audio {
+                documents: false, ..
+            } => "search_audio",
+            Self::Audio {
+                documents: true, ..
+            } => "search_document",
+        }
+    }
+
     fn chat_id(&self) -> Option<i64> {
         match self {
             Self::LoadMain | Self::LoadArchive | Self::ListMain | Self::ListArchive => None,
@@ -99,6 +155,10 @@ pub struct SourceEngine {
     // must not remove them, or the progress numerator moves backwards.
     finished_checks: BTreeSet<i64>,
     probe_pause_until: Option<Instant>,
+    scan_started: Option<Instant>,
+    last_report: Option<Instant>,
+    stats: ScanStats,
+    audio_pages_per_chat: BTreeMap<i64, u64>,
 }
 
 impl SourceEngine {
@@ -130,6 +190,10 @@ impl SourceEngine {
             proof_messages: BTreeMap::new(),
             finished_checks: BTreeSet::new(),
             probe_pause_until: None,
+            scan_started: None,
+            last_report: None,
+            stats: ScanStats::default(),
+            audio_pages_per_chat: BTreeMap::new(),
         }
     }
 
@@ -138,6 +202,10 @@ impl SourceEngine {
     }
 
     fn fail(&mut self, message: &str) {
+        if self.scan_started.is_some() {
+            self.report_scan("failed");
+            self.scan_started = None;
+        }
         // A failed manual resync must not strand the user on an empty source
         // list when a successful catalog was already saved.
         if let (Some(store), Some(account)) = (&self.store, self.snapshot.account_id)
@@ -253,6 +321,11 @@ impl SourceEngine {
     }
 
     fn restart(&mut self, _td: &TdJson) {
+        self.scan_started = Some(Instant::now());
+        self.last_report = self.scan_started;
+        self.stats = ScanStats::default();
+        self.audio_pages_per_chat.clear();
+        scan_log("event=start");
         self.jobs.clear();
         self.active.clear();
         self.probe_pause_until = None;
@@ -687,9 +760,48 @@ impl SourceEngine {
         let Some(extra) = value["@extra"].as_i64() else {
             return false;
         };
-        let Some((job, _)) = self.active.remove(&extra) else {
+        let Some((job, started)) = self.active.remove(&extra) else {
             return false;
         };
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        self.stats.requests += 1;
+        self.stats.request_ms += elapsed_ms;
+        self.stats.slowest_ms = self.stats.slowest_ms.max(elapsed_ms);
+        match &job {
+            Job::Audio {
+                documents: true, ..
+            } => {
+                self.stats.document_requests += 1;
+                self.stats.document_messages += value["messages"]
+                    .as_array()
+                    .map_or(0, |messages| messages.len() as u64);
+            }
+            Job::Audio { chat_id, .. } => {
+                self.stats.audio_requests += 1;
+                let messages = value["messages"].as_array();
+                self.stats.audio_messages += messages.map_or(0, |items| items.len() as u64);
+                self.stats.audio_nonplayable += messages.map_or(0, |items| {
+                    items
+                        .iter()
+                        .filter(|item| !super::playable_music_message(item))
+                        .count() as u64
+                });
+                let pages = self.audio_pages_per_chat.entry(*chat_id).or_default();
+                *pages += 1;
+                self.stats.max_audio_pages_per_chat =
+                    self.stats.max_audio_pages_per_chat.max(*pages);
+            }
+            _ => (),
+        }
+        if elapsed_ms >= 2000 {
+            scan_log(&format!(
+                "event=slow_request kind={} elapsed_ms={} queued={} active={}",
+                job.log_kind(),
+                elapsed_ms,
+                self.jobs.len(),
+                self.active.len()
+            ));
+        }
         if let Job::Audio { chat_id, epoch, .. } = &job
             && self.scan_epochs.get(chat_id).copied().unwrap_or(0) != *epoch
         {
@@ -718,7 +830,9 @@ impl SourceEngine {
                 } else if matches!(job, Job::Audio { .. })
                     && (code == 429 || flood_wait_secs(reason).is_some())
                 {
+                    self.stats.flood_waits += 1;
                     let wait = flood_wait_secs(reason).unwrap_or(5).min(60);
+                    scan_log(&format!("event=flood_wait wait_s={wait}"));
                     self.probe_pause_until = Some(Instant::now() + Duration::from_secs(wait));
                     self.enqueue_job(job);
                 } else if let Some(chat_id) = job.chat_id() {
@@ -893,6 +1007,14 @@ impl SourceEngine {
     }
 
     fn finish_lists(&mut self) {
+        scan_log(&format!(
+            "event=chats_loaded elapsed_ms={} listed={} cached={} requests={}",
+            self.scan_started
+                .map_or(0, |start| start.elapsed().as_millis()),
+            self.main_ids.union(&self.archive_ids).count(),
+            self.chats.len(),
+            self.stats.requests
+        ));
         self.lists_ready = true;
         self.snapshot.stage = DiscoveryStage::CheckingMusic;
         if let Some(account) = self.snapshot.account_id {
@@ -1156,8 +1278,18 @@ impl SourceEngine {
         documents: bool,
     ) {
         match super::music_probe_page(value, before) {
-            super::MusicProbePage::Found(message_id) => self.mark_found(chat_id, message_id),
+            super::MusicProbePage::Found(message_id) => {
+                if documents {
+                    self.stats.document_found += 1;
+                } else {
+                    self.stats.audio_found += 1;
+                }
+                self.mark_found(chat_id, message_id)
+            }
             super::MusicProbePage::Next(before) => {
+                if !documents {
+                    self.stats.audio_next_pages += 1;
+                }
                 self.enqueue_job(Job::Audio {
                     chat_id,
                     before,
@@ -1166,6 +1298,7 @@ impl SourceEngine {
                 });
             }
             super::MusicProbePage::Exhausted if !documents => {
+                self.stats.audio_exhausted += 1;
                 self.enqueue_job(Job::Audio {
                     chat_id,
                     before: 0,
@@ -1173,7 +1306,10 @@ impl SourceEngine {
                     documents: true,
                 });
             }
-            super::MusicProbePage::Exhausted => self.mark_empty(chat_id),
+            super::MusicProbePage::Exhausted => {
+                self.stats.document_exhausted += 1;
+                self.mark_empty(chat_id)
+            }
             super::MusicProbePage::Invalid(reason) => {
                 self.mark_failed(chat_id, "music history", 0, reason);
             }
@@ -1234,6 +1370,8 @@ impl SourceEngine {
     }
 
     fn fail_timeout(&mut self, job: Job) {
+        self.stats.timeouts += 1;
+        scan_log(&format!("event=timeout kind={}", job.log_kind()));
         if let Some(chat_id) = job.chat_id() {
             if !matches!(job, Job::GetChat { .. })
                 || self
@@ -1336,7 +1474,42 @@ impl SourceEngine {
         }
         self.snapshot.stage = DiscoveryStage::Complete;
         self.snapshot.show_partial = true;
+        self.report_scan("complete");
+        self.scan_started = None;
         self.publish();
+    }
+
+    fn report_scan(&mut self, event: &str) {
+        let elapsed_s = self
+            .scan_started
+            .map_or(0, |start| start.elapsed().as_secs());
+        let avg_ms = self.stats.request_ms / self.stats.requests.max(1);
+        let pause_s = self.probe_pause_until.map_or(0, |until| {
+            until.saturating_duration_since(Instant::now()).as_secs()
+        });
+        scan_log(&format!(
+            "event={event} elapsed_s={elapsed_s} checked={} total={} queued={} active={} pause_s={pause_s} requests={} avg_ms={avg_ms} max_ms={} audio_requests={} audio_messages={} audio_nonplayable={} audio_next_pages={} max_audio_pages_per_chat={} audio_found={} audio_empty={} document_requests={} document_messages={} document_found={} document_empty={} timeouts={} flood_waits={}",
+            self.snapshot.checked_chats,
+            self.snapshot.total_chats,
+            self.jobs.len(),
+            self.active.len(),
+            self.stats.requests,
+            self.stats.slowest_ms,
+            self.stats.audio_requests,
+            self.stats.audio_messages,
+            self.stats.audio_nonplayable,
+            self.stats.audio_next_pages,
+            self.stats.max_audio_pages_per_chat,
+            self.stats.audio_found,
+            self.stats.audio_exhausted,
+            self.stats.document_requests,
+            self.stats.document_messages,
+            self.stats.document_found,
+            self.stats.document_exhausted,
+            self.stats.timeouts,
+            self.stats.flood_waits
+        ));
+        self.last_report = Some(Instant::now());
     }
 
     pub fn drive(&mut self, td: &TdJson) {
@@ -1348,6 +1521,12 @@ impl SourceEngine {
             )
         {
             return;
+        }
+        if self
+            .last_report
+            .is_none_or(|last| last.elapsed() >= SCAN_REPORT_INTERVAL)
+        {
+            self.report_scan("progress");
         }
         let timed_out: Vec<_> = self
             .active

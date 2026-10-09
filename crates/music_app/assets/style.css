@@ -213,8 +213,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--lime); outl
 }
 .library-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 58px; padding: 0 25px; }
 .library-header h1 { margin: 0; font-size: 25px; font-weight: 800; letter-spacing: -.035em; line-height: 1.15; }
-.library-reindex { display: inline-flex; flex: none; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 8px 13px; border: 1px solid rgba(255,254,250,.14); border-radius: 11px; background: var(--library-soft); color: var(--library-lime); font-size: 12px; font-weight: 750; white-space: nowrap; }
-.library-reindex svg { width: 17px; height: 17px; }
+.library-reindex { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 1px solid rgba(255,254,250,.14); border-radius: 11px; background: var(--library-soft); color: var(--library-lime); }
+.library-reindex svg { width: 20px; height: 20px; }
 .library-reindex:disabled { color: var(--library-secondary); opacity: .55; }
 .library-pills { display: flex; flex: none; gap: 7px; overflow-x: auto; padding: 16px 24px 12px; scrollbar-width: none; }
 .library-pills::-webkit-scrollbar { display: none; }
@@ -243,13 +243,18 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--lime); outl
 .library-row-action { display: grid; flex: none; place-items: center; width: 32px; height: 44px; padding: 0; border: 0; background: none; color: var(--library-secondary); }
 .library-row-action svg { width: 17px; height: 17px; }
 .library-row-action:first-of-type svg { border-radius: 50%; background: var(--library-soft); }
-.library-alphabet { display: flex; flex: none; flex-direction: column; align-items: center; width: 17px; padding-top: 4px; color: var(--library-secondary); font-size: 10px; line-height: 1.72; user-select: none; }
+.library-alphabet { position: sticky; top: 0; display: flex; flex: none; flex-direction: column; align-items: center; align-self: flex-start; width: 30px; max-height: calc(100dvh - 230px); overflow-y: auto; padding: 2px 0; scrollbar-width: none; user-select: none; }
+.library-alphabet::-webkit-scrollbar { display: none; }
+.library-letter { display: grid; flex: none; place-items: center; width: 30px; min-height: 25px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--library-secondary); font-size: 11px; line-height: 1; touch-action: manipulation; }
+.library-letter.active { background: var(--library-lime); color: #171a19; font-weight: 750; }
+.library-letter:not(.active):active { background: var(--library-soft); color: var(--library-ink); }
 .library-more { display: block; min-height: 44px; margin: 15px auto; padding: 8px 18px; border: 0; border-radius: 999px; background: var(--library-soft); color: var(--library-ink); font-size: 12px; font-weight: 650; }
 .library-indexing { margin: 10px 0; color: var(--library-secondary); font-size: 12px; }
 .library-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 52dvh; padding: 24px 20px; text-align: center; }
 .library-empty img { width: 64px; height: 64px; margin-bottom: 18px; border-radius: 16px; }
 .library-empty h2 { margin: 0 0 8px; font-size: 19px; line-height: 1.2; letter-spacing: -.02em; }
 .library-empty p { max-width: 31ch; margin: 0; color: var(--library-secondary); font-size: 13px; line-height: 1.45; }
+.library-empty-filter { flex: 1; min-width: 0; min-height: 45dvh; padding-inline: 8px; }
 .music-black-page { flex: 1; min-height: 0; background: #000; }
 .music-bottom-nav { display: grid; flex: none; grid-template-columns: repeat(3, 1fr); align-items: start; width: 100%; min-height: calc(64px + env(safe-area-inset-bottom)); padding: 6px max(13px, calc((100vw - 680px) / 2)) max(4px, env(safe-area-inset-bottom)); background: var(--library-surface); border-top: 1px solid rgba(255,254,250,.08); }
 .nav-tab { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 51px; padding: 2px 8px; border: 0; background: none; color: var(--library-secondary); font-size: 10px; line-height: 1.1; }

@@ -59,6 +59,8 @@ pub fn LibraryView(snapshot: LibrarySnapshot) -> Element {
                         button {
                             class: "library-reindex",
                             r#type: "button",
+                            aria_label: if snapshot.indexing_sources > 0 { "Indexing selected sources" } else { "Reindex selected sources" },
+                            title: if snapshot.indexing_sources > 0 { "Indexing selected sources" } else { "Reindex selected sources" },
                             disabled: snapshot.selected_sources == 0 || snapshot.indexing_sources > 0 || snapshot.error.is_some(),
                             onclick: move |_| {
                                 if let Ok(service) = AuthService::global() {
@@ -68,7 +70,6 @@ pub fn LibraryView(snapshot: LibrarySnapshot) -> Element {
                             svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round",
                                 path { d: "M20 11a8 8 0 1 0-2.4 6.7M20 4v7h-7" }
                             }
-                            if snapshot.indexing_sources > 0 { "Indexing…" } else { "Reindex" }
                         }
                     }
                     div { class: "library-pills", aria_label: "Library categories",
@@ -79,7 +80,9 @@ pub fn LibraryView(snapshot: LibrarySnapshot) -> Element {
                         button { class: "library-pill", r#type: "button", disabled: true, "Albums" }
                     }
                     div { class: "library-toolbar",
-                        span { class: "library-count", "{snapshot.total_count} tracks" }
+                        span { class: "library-count",
+                            if snapshot.total_count == 1 { "1 track" } else { "{snapshot.total_count} tracks" }
+                        }
                         div { class: "library-tools",
                             button { r#type: "button", disabled: true, class: "library-tool downloaded",
                                 svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", path { d: "M12 3v11m0 0 4-4m-4 4-4-4M5 16a8 8 0 1 0 14-6" } }
@@ -100,7 +103,7 @@ pub fn LibraryView(snapshot: LibrarySnapshot) -> Element {
                         }
                     }
                     div { class: "library-scroll",
-                        if snapshot.tracks.is_empty() {
+                        if snapshot.tracks.is_empty() && snapshot.active_initial.is_none() {
                             div { class: "library-empty",
                                 img { src: NOTE, alt: "" }
                                 h2 { if snapshot.indexing_sources > 0 { "Finding your tracks" } else { "Your library is empty" } }
@@ -108,14 +111,28 @@ pub fn LibraryView(snapshot: LibrarySnapshot) -> Element {
                             }
                         } else {
                             div { class: "library-list-wrap",
-                                ul { class: "library-list",
-                                    for track in snapshot.tracks.iter().cloned() {
-                                        TrackRow { track }
+                                if snapshot.tracks.is_empty() {
+                                    div { class: "library-empty library-empty-filter",
+                                        h2 { "No tracks start with {snapshot.active_initial.unwrap_or_default()}" }
+                                        p { "Tap the highlighted letter again to show all tracks." }
+                                    }
+                                } else {
+                                    ul { class: "library-list",
+                                        for track in snapshot.tracks.iter().cloned() {
+                                            TrackRow { track }
+                                        }
                                     }
                                 }
-                                div { class: "library-alphabet", aria_label: "Alphabet index unavailable",
+                                div { class: "library-alphabet", aria_label: "Filter tracks by first letter",
                                     for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ".chars() {
-                                        span { "{letter}" }
+                                        button {
+                                            class: if snapshot.active_initial == Some(letter) { "library-letter active" } else { "library-letter" },
+                                            r#type: "button",
+                                            aria_label: if snapshot.active_initial == Some(letter) { format!("Clear {letter} filter") } else { format!("Show tracks starting with {letter}") },
+                                            aria_pressed: snapshot.active_initial == Some(letter),
+                                            onclick: move |_| { if let Ok(service) = AuthService::global() { let _ = service.submit_library(LibraryCommand::SelectInitial(letter)); } },
+                                            "{letter}"
+                                        }
                                     }
                                 }
                             }

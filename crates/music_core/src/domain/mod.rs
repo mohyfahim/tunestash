@@ -167,6 +167,7 @@ pub struct LibrarySnapshot {
     pub account_id: Option<i64>,
     pub tracks: Vec<TrackSummary>,
     pub total_count: usize,
+    pub active_initial: Option<char>,
     pub selected_sources: usize,
     pub indexing_sources: usize,
     pub has_more: bool,
@@ -176,6 +177,7 @@ pub struct LibrarySnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LibraryCommand {
     LoadMore,
+    SelectInitial(char),
     Reindex,
     Retry,
 }

@@ -92,6 +92,7 @@ pub struct LibraryEngine {
     queued: VecDeque<Job>,
     active: BTreeMap<i64, (Job, Instant)>,
     loaded: usize,
+    active_initial: Option<char>,
     error: Option<String>,
     pause_until: Option<Instant>,
 }
@@ -111,6 +112,7 @@ impl LibraryEngine {
             queued: VecDeque::new(),
             active: BTreeMap::new(),
             loaded: 50,
+            active_initial: None,
             error,
             pause_until: None,
         }
@@ -119,12 +121,13 @@ impl LibraryEngine {
     fn publish(&self) {
         let mut snapshot = LibrarySnapshot {
             account_id: self.account,
+            active_initial: self.active_initial,
             selected_sources: self.selected.len(),
             error: self.error.clone(),
             ..Default::default()
         };
         if let (Some(store), Some(account)) = (&self.store, self.account) {
-            match store.page(account, self.loaded) {
+            match store.page(account, self.loaded, self.active_initial) {
                 Ok((tracks, count)) => {
                     snapshot.total_count = count;
                     snapshot.has_more = count > tracks.len();
@@ -157,6 +160,7 @@ impl LibraryEngine {
         self.active.clear();
         self.pause_until = None;
         self.loaded = 50;
+        self.active_initial = None;
         if self.store.is_some() {
             self.error = None;
         }
@@ -214,6 +218,19 @@ impl LibraryEngine {
         match command {
             LibraryCommand::LoadMore => {
                 self.loaded = self.loaded.saturating_add(50);
+                self.publish();
+            }
+            LibraryCommand::SelectInitial(letter) => {
+                if !letter.is_ascii_alphabetic() {
+                    return;
+                }
+                let letter = letter.to_ascii_uppercase();
+                self.active_initial = if self.active_initial == Some(letter) {
+                    None
+                } else {
+                    Some(letter)
+                };
+                self.loaded = 50;
                 self.publish();
             }
             LibraryCommand::Reindex => {
@@ -580,7 +597,10 @@ mod tests {
                 cursor: 77
             }
         )));
-        assert_eq!(engine.store.as_ref().unwrap().page(7, 50).unwrap().1, 1);
+        assert_eq!(
+            engine.store.as_ref().unwrap().page(7, 50, None).unwrap().1,
+            1
+        );
         drop(engine);
         drop(source_store);
         std::fs::remove_file(path).unwrap();
@@ -626,6 +646,63 @@ mod tests {
         assert_eq!(receiver.borrow().indexing_sources, 1);
         engine.command(LibraryCommand::Reindex);
         assert_eq!(engine.queued.len(), 2);
+        drop(engine);
+        drop(source_store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn letter_selection_resets_paging_and_tracks_live_index_updates() {
+        let path = std::env::temp_dir().join(format!(
+            "tunestash-library-initial-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let source_store = SourceStore::open(&path).unwrap();
+        let chat = SourceChat {
+            chat_id: 42,
+            title: "Music bot".into(),
+            subtitle: String::new(),
+            kind: SourceKind::MusicBot,
+            selected: true,
+            music: MusicCheck::Found,
+        };
+        source_store.set_selected(7, &chat, true).unwrap();
+        let (updates, receiver) = watch::channel(LibrarySnapshot::default());
+        let mut engine = LibraryEngine::new(path.to_str().unwrap(), updates);
+        engine.sync_sources(&SourceSnapshot {
+            account_id: Some(7),
+            setup_complete: true,
+            chats: vec![chat],
+            ..Default::default()
+        });
+        engine.command(LibraryCommand::LoadMore);
+        assert_eq!(engine.loaded, 100);
+        engine.command(LibraryCommand::SelectInitial('a'));
+        assert_eq!(engine.loaded, 50);
+        assert_eq!(receiver.borrow().active_initial, Some('A'));
+        assert_eq!(receiver.borrow().indexing_sources, 1);
+        for (id, title) in [(1, "Amber"), (2, "Blue"), (3, "apricot")] {
+            engine.observe_update(&json!({
+                "@type":"updateNewMessage", "message":{
+                    "id":id, "chat_id":42, "date":id,
+                    "content":{"@type":"messageAudio", "audio":{
+                        "title":title, "file_name":format!("{id}.mp3")
+                    }}
+                }
+            }));
+        }
+        assert_eq!(receiver.borrow().active_initial, Some('A'));
+        assert_eq!(receiver.borrow().total_count, 2);
+        assert_eq!(receiver.borrow().tracks[0].title, "Amber");
+        engine.command(LibraryCommand::SelectInitial('Z'));
+        assert_eq!(receiver.borrow().active_initial, Some('Z'));
+        assert_eq!(receiver.borrow().total_count, 0);
+        engine.command(LibraryCommand::SelectInitial('Z'));
+        assert_eq!(receiver.borrow().active_initial, None);
+        assert_eq!(receiver.borrow().total_count, 3);
+        engine.command(LibraryCommand::SelectInitial('1'));
+        assert_eq!(receiver.borrow().active_initial, None);
         drop(engine);
         drop(source_store);
         std::fs::remove_file(path).unwrap();
