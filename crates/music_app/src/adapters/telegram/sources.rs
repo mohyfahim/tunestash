@@ -78,6 +78,9 @@ pub struct SourceEngine {
     logout_account: Option<i64>,
     scan_epochs: BTreeMap<i64, u64>,
     proof_messages: BTreeMap<i64, i64>,
+    // Chats that already reached a finished music check in this scan. Rechecks
+    // must not remove them, or the progress numerator moves backwards.
+    finished_checks: BTreeSet<i64>,
 }
 
 impl SourceEngine {
@@ -104,6 +107,7 @@ impl SourceEngine {
             logout_account: None,
             scan_epochs: BTreeMap::new(),
             proof_messages: BTreeMap::new(),
+            finished_checks: BTreeSet::new(),
         }
     }
 
@@ -144,6 +148,7 @@ impl SourceEngine {
         };
         self.jobs.clear();
         self.active = None;
+        self.finished_checks.clear();
         self.chats.remove(&user_id);
         let saved_messages = SourceChat {
             chat_id: user_id,
@@ -238,6 +243,7 @@ impl SourceEngine {
         self.snapshot.show_partial = false;
         self.scan_epochs.clear();
         self.proof_messages.clear();
+        self.finished_checks.clear();
         self.snapshot
             .chats
             .retain(|chat| chat.kind == SourceKind::SavedMessages);
@@ -375,6 +381,7 @@ impl SourceEngine {
         self.lists_ready = false;
         self.scan_epochs.clear();
         self.proof_messages.clear();
+        self.finished_checks.clear();
         self.snapshot = SourceSnapshot::default();
         self.publish();
     }
@@ -553,7 +560,10 @@ impl SourceEngine {
             return true;
         }
         if value["@type"] == "updateDeleteMessages" {
-            if let Some(chat_id) = value["chat_id"].as_i64()
+            // from_cache means TDLib dropped a local copy that can be loaded
+            // again. That is not a deletion of the proof message.
+            if value["from_cache"] != true
+                && let Some(chat_id) = value["chat_id"].as_i64()
                 && let Some(proof) = self.proof_messages.get(&chat_id)
                 && value["message_ids"]
                     .as_array()
@@ -833,17 +843,20 @@ impl SourceEngine {
     }
 
     fn refresh_progress(&mut self) {
+        for chat in &self.snapshot.chats {
+            if matches!(
+                chat.music,
+                MusicCheck::Found | MusicCheck::Empty | MusicCheck::Failed
+            ) {
+                self.finished_checks.insert(chat.chat_id);
+            }
+        }
         self.snapshot.total_chats = self.snapshot.chats.len();
         self.snapshot.checked_chats = self
             .snapshot
             .chats
             .iter()
-            .filter(|chat| {
-                matches!(
-                    chat.music,
-                    MusicCheck::Found | MusicCheck::Empty | MusicCheck::Failed
-                )
-            })
+            .filter(|chat| self.finished_checks.contains(&chat.chat_id))
             .count();
         self.snapshot.failed_checks = self.snapshot.failed_chats.len();
         self.snapshot.error = match self.snapshot.failed_checks {
@@ -1470,6 +1483,126 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("save setup")
+        );
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rescanning_a_finished_chat_does_not_lower_progress() {
+        let (mut engine, path) = selected_engine("progress-rescan");
+        engine.add_chat(SourceChat {
+            chat_id: 43,
+            title: "Other group".into(),
+            subtitle: "Group chat".into(),
+            kind: SourceKind::OtherChat,
+            selected: false,
+            music: MusicCheck::Unchecked,
+        });
+        engine.snapshot.stage = DiscoveryStage::CheckingMusic;
+        engine.mark_found(42, 100);
+        engine.mark_found(43, 200);
+        assert_eq!(
+            (engine.snapshot.checked_chats, engine.snapshot.total_chats),
+            (2, 2)
+        );
+
+        engine.rescan_chat(42);
+        engine.rescan_chat(43);
+
+        assert_eq!(
+            engine
+                .snapshot
+                .chats
+                .iter()
+                .filter(|chat| chat.music == MusicCheck::Unchecked)
+                .count(),
+            2
+        );
+        assert_eq!(
+            (engine.snapshot.checked_chats, engine.snapshot.total_chats),
+            (2, 2)
+        );
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cache_only_delete_does_not_recheck_a_finished_chat() {
+        let (mut engine, path) = selected_engine("progress-cache-delete");
+        engine.snapshot.stage = DiscoveryStage::CheckingMusic;
+        engine.mark_found(42, 100);
+        assert_eq!(
+            (engine.snapshot.checked_chats, engine.snapshot.total_chats),
+            (1, 1)
+        );
+
+        assert!(engine.handle_value(
+            &TdJson,
+            &json!({
+                "@type": "updateDeleteMessages",
+                "chat_id": 42,
+                "message_ids": [100],
+                "from_cache": true
+            })
+        ));
+
+        assert_eq!(engine.snapshot.chats[0].music, MusicCheck::Found);
+        assert!(engine.jobs.is_empty());
+        assert_eq!(
+            (engine.snapshot.checked_chats, engine.snapshot.total_chats),
+            (1, 1)
+        );
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn permanent_delete_rechecks_without_lowering_progress() {
+        let (mut engine, path) = selected_engine("progress-permanent-delete");
+        engine.snapshot.stage = DiscoveryStage::CheckingMusic;
+        engine.mark_found(42, 100);
+
+        assert!(engine.handle_value(
+            &TdJson,
+            &json!({
+                "@type": "updateDeleteMessages",
+                "chat_id": 42,
+                "message_ids": [100],
+                "from_cache": false
+            })
+        ));
+
+        assert_eq!(engine.snapshot.chats[0].music, MusicCheck::Unchecked);
+        assert!(engine.jobs.iter().any(|job| job.chat_id() == Some(42)));
+        assert_eq!(
+            (engine.snapshot.checked_chats, engine.snapshot.total_chats),
+            (1, 1)
+        );
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_new_scan_starts_progress_at_zero() {
+        let (mut engine, path) = selected_engine("progress-restart");
+        engine.mark_found(42, 100);
+        assert_eq!(engine.snapshot.checked_chats, 1);
+
+        engine.restart(&TdJson);
+        engine.add_chat(SourceChat {
+            chat_id: 42,
+            title: "Music group".into(),
+            subtitle: "Group chat".into(),
+            kind: SourceKind::OtherChat,
+            selected: false,
+            music: MusicCheck::Unchecked,
+        });
+        engine.refresh_progress();
+
+        assert_eq!(
+            (engine.snapshot.checked_chats, engine.snapshot.total_chats),
+            (0, 1)
         );
         drop(engine);
         let _ = std::fs::remove_file(path);

@@ -1,8 +1,8 @@
 {
   "crates/music_app/Cargo.toml": {
-    "mtime": 1791522621.26268,
-    "seen": 1791542983.897858,
-    "ast_hash": "dbce9a44792bbb6e7136ad468739ff87",
+    "mtime": 1790916529.774253,
+    "seen": 1790916717.9333272,
+    "ast_hash": "b12cf2093c5825fc77e2c8a8d9ae7509",
     "semantic_hash": ""
   },
   "crates/music_app/src/adapters/media/mod.rs": {
@@ -18,50 +18,50 @@
     "semantic_hash": ""
   },
   "crates/music_app/src/adapters/secure_store/mod.rs": {
-    "mtime": 1791427959.880164,
-    "seen": 1791542983.898067,
-    "ast_hash": "938a2061fd1ec14adba2ba82f4757877",
+    "mtime": 1790916533.8262522,
+    "seen": 1790916717.933341,
+    "ast_hash": "8c7bc592261a14256b387a55bd8f8468",
     "semantic_hash": ""
   },
   "crates/music_app/src/adapters/sqlite/mod.rs": {
-    "mtime": 1791530915.8879848,
-    "seen": 1791542983.8980696,
-    "ast_hash": "9ae63966f352d73fa761dde755afd3d2",
+    "mtime": 1790916532.9382522,
+    "seen": 1790916717.9333425,
+    "ast_hash": "e59b7aacefcf1a5275d39f66f0625bec",
     "semantic_hash": ""
   },
   "crates/music_app/src/adapters/telegram/mod.rs": {
-    "mtime": 1791526755.9701035,
-    "seen": 1791542983.8980718,
-    "ast_hash": "aae650378faed12f3aa6a5a375fc418a",
+    "mtime": 1790916533.0982523,
+    "seen": 1790916717.933344,
+    "ast_hash": "dee46b448a880224177111847b44cce9",
     "semantic_hash": ""
   },
   "crates/music_app/src/lib.rs": {
-    "mtime": 1790919256.5180783,
-    "seen": 1791542983.898076,
-    "ast_hash": "ead309a17f08628022e961587d0c11a0",
+    "mtime": 1790916531.1262527,
+    "seen": 1790916717.9333456,
+    "ast_hash": "3cf5cfbff350b5637fdb8e0603ac5d6c",
     "semantic_hash": ""
   },
   "crates/music_app/src/main.rs": {
-    "mtime": 1790919256.334076,
-    "seen": 1791542983.898078,
-    "ast_hash": "2f8ee79ae7fbf7825be1d220fc61465c",
+    "mtime": 1790916668.2344377,
+    "seen": 1790916717.9333465,
+    "ast_hash": "6881eedddfc3973b863faf48ee45c1be",
     "semantic_hash": ""
   },
   "crates/music_app/src/runtime/mod.rs": {
-    "mtime": 1791522655.318774,
-    "seen": 1791542983.8980794,
-    "ast_hash": "fa7ba70bfeaa48d134f9004200ef0565",
+    "mtime": 1790916532.1702523,
+    "seen": 1790916717.933348,
+    "ast_hash": "b06e05115e81b5a347a2d368e2e07b7a",
     "semantic_hash": ""
   },
   "crates/music_app/src/ui/mod.rs": {
-    "mtime": 1791530800.0374386,
-    "seen": 1791542983.8980813,
-    "ast_hash": "178fa6e1840668c73b71aabf582d972b",
+    "mtime": 1790916531.7022526,
+    "seen": 1790916717.9333494,
+    "ast_hash": "68d1c54800b5015d4aa9180ee900a110",
     "semantic_hash": ""
   },
   "crates/music_core/Cargo.toml": {
-    "mtime": 1790918319.430432,
-    "seen": 1791542983.8980854,
+    "mtime": 1790916526.822254,
+    "seen": 1790916717.9333506,
     "ast_hash": "a8a9b3f1900d0e29b9d032980cb0587b",
     "semantic_hash": ""
   },
@@ -72,9 +72,9 @@
     "semantic_hash": ""
   },
   "crates/music_core/src/domain/mod.rs": {
-    "mtime": 1791530685.946855,
-    "seen": 1791542983.8981607,
-    "ast_hash": "55940b554e85e80f61ed72efc0e541b8",
+    "mtime": 1790916528.1742535,
+    "seen": 1790916717.9333534,
+    "ast_hash": "b16f576f9cd8ce8cd0c8f1bd37903f9d",
     "semantic_hash": ""
   },
   "crates/music_core/src/lib.rs": {
@@ -84,9 +84,9 @@
     "semantic_hash": ""
   },
   "crates/music_core/src/ports/mod.rs": {
-    "mtime": 1791426329.435447,
-    "seen": 1791542983.8982239,
-    "ast_hash": "dd84028b0d93a3058911232716e54767",
+    "mtime": 1790916529.0862532,
+    "seen": 1790916717.933356,
+    "ast_hash": "b09c2d7b7817afa20c25996ac75bc4b5",
     "semantic_hash": ""
   },
   "fonts/vazirmatn/package.json": {
@@ -546,20 +546,20 @@
     "semantic_hash": ""
   },
   "PRODUCT.md": {
-    "mtime": 1791529394.3121624,
-    "seen": 1791542983.9029393,
-    "ast_hash": "2e375e54275a4dc0f56197692fe99b2f",
+    "mtime": 1790843954.4755151,
+    "seen": 1790916717.9334576,
+    "ast_hash": "06d1e161308d775f8c0ed21668765374",
     "semantic_hash": ""
   },
   "SDD.md": {
-    "mtime": 1791529394.4961743,
-    "seen": 1791542983.9029412,
-    "ast_hash": "811a847b0ecfbcfa7c86870bdad7fd31",
+    "mtime": 1790856625.4862707,
+    "seen": 1790916717.933459,
+    "ast_hash": "e7e4bbfbb38fd3bd2d08e4596a8f0571",
     "semantic_hash": ""
   },
   "TASK.md": {
-    "mtime": 1790941805.0686517,
-    "seen": 1791542983.9029427,
+    "mtime": 1790883338.8366117,
+    "seen": 1790916717.9334605,
     "ast_hash": "aaff8e6dae9b0267a28661655f8b2c58",
     "semantic_hash": ""
   },
@@ -747,114 +747,6 @@
     "mtime": 1790856849.4320986,
     "seen": 1790916717.9335167,
     "ast_hash": "191a914662baede84d7f1c702447eaa9",
-    "semantic_hash": ""
-  },
-  "crates/music_app/android/MainActivity.kt": {
-    "mtime": 1791429666.2533085,
-    "seen": 1791542983.8978655,
-    "ast_hash": "5a7d7ba1df81fa7e91367f71d95bca45",
-    "semantic_hash": ""
-  },
-  "crates/music_app/src/adapters/telegram/sources.rs": {
-    "mtime": 1791542959.7303407,
-    "seen": 1791542983.898074,
-    "ast_hash": "ffd7f6ec5fc72515305b5dbd25a36f69",
-    "semantic_hash": ""
-  },
-  "crates/music_app/src/ui/sources.rs": {
-    "mtime": 1791530782.105038,
-    "seen": 1791542983.898083,
-    "ast_hash": "9e511c182e9dd496425d8a5fd87b9a5e",
-    "semantic_hash": ""
-  },
-  "scripts/build-android.sh": {
-    "mtime": 1791522888.6028228,
-    "seen": 1791542983.9028316,
-    "ast_hash": "981252f3aee0bae08c02ee57bf89312e",
-    "semantic_hash": ""
-  },
-  "scripts/build-tdlib-android.sh": {
-    "mtime": 1791428802.99472,
-    "seen": 1791542983.9028342,
-    "ast_hash": "1077d75162dd23e3b8929764d9872953",
-    "semantic_hash": ""
-  },
-  "scripts/install-android.sh": {
-    "mtime": 1790940882.3913426,
-    "seen": 1791542983.902836,
-    "ast_hash": "9a8af502d6695a5cf137f26f61466297",
-    "semantic_hash": ""
-  },
-  "TODO.md": {
-    "mtime": 1791531328.3246257,
-    "seen": 1791542983.9029446,
-    "ast_hash": "5dff58476ae92bddeb9c8063bc707bcc",
-    "semantic_hash": ""
-  },
-  "docs/ANDROID_SETUP.md": {
-    "mtime": 1791523536.6588912,
-    "seen": 1791542983.9029467,
-    "ast_hash": "a52c4cfbe5ab189b71f2303cfe86605b",
-    "semantic_hash": ""
-  },
-  "docs/IMPLEMENTATION_STATUS.md": {
-    "mtime": 1791531117.9042838,
-    "seen": 1791542983.9029489,
-    "ast_hash": "c0cc0584159b0d535759865a8f63f286",
-    "semantic_hash": ""
-  },
-  "android/icons/tunestash-512.png": {
-    "mtime": 1791426748.2661674,
-    "seen": 1791542983.903897,
-    "ast_hash": "9c3472f70b2e62526f9255312a614a4c",
-    "semantic_hash": ""
-  },
-  "android/res/mipmap-hdpi/ic_launcher.png": {
-    "mtime": 1791428626.6390102,
-    "seen": 1791542983.9038997,
-    "ast_hash": "456da455550c51bd47a3f3c88d30b699",
-    "semantic_hash": ""
-  },
-  "android/res/mipmap-mdpi/ic_launcher.png": {
-    "mtime": 1791428626.6310103,
-    "seen": 1791542983.9039016,
-    "ast_hash": "698185002df39c5fa559273b2542d8a2",
-    "semantic_hash": ""
-  },
-  "android/res/mipmap-xhdpi/ic_launcher.png": {
-    "mtime": 1791428626.6470103,
-    "seen": 1791542983.9039035,
-    "ast_hash": "22e7a930e5249e27086d2b3fb497c08a",
-    "semantic_hash": ""
-  },
-  "android/res/mipmap-xxhdpi/ic_launcher.png": {
-    "mtime": 1791428626.6590102,
-    "seen": 1791542983.903905,
-    "ast_hash": "2c29a492796ce283f01d3adea5664fd8",
-    "semantic_hash": ""
-  },
-  "android/res/mipmap-xxxhdpi/ic_launcher.png": {
-    "mtime": 1791428626.6750102,
-    "seen": 1791542983.9039063,
-    "ast_hash": "326368a48ab720e6327ea1c2da5bf227",
-    "semantic_hash": ""
-  },
-  "crates/music_app/assets/login-wave.svg": {
-    "mtime": 1791426663.989469,
-    "seen": 1791542983.9042966,
-    "ast_hash": "832a7466208f83ee086f530abdb776e7",
-    "semantic_hash": ""
-  },
-  "crates/music_app/assets/music-note.svg": {
-    "mtime": 1791426663.8094773,
-    "seen": 1791542983.904299,
-    "ast_hash": "c13826391cce983b713ad818a12c1dd9",
-    "semantic_hash": ""
-  },
-  "docs/device-evidence/sm-a256e-android14-blank.png": {
-    "mtime": 1790940200.9280434,
-    "seen": 1791542983.9043005,
-    "ast_hash": "c9c354fe388e7f79719d0ea79c9d6d22",
     "semantic_hash": ""
   }
 }
