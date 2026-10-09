@@ -1,14 +1,21 @@
-//! TDLib C/JSON authentication client. Only this module touches unsafe FFI.
+//! TDLib C/JSON client. Only this module touches unsafe FFI.
+
+#[cfg(target_os = "android")]
+mod sources;
 
 #[cfg(target_os = "android")]
 use music_core::domain::AuthSnapshot;
 #[cfg(any(target_os = "android", test))]
 use music_core::domain::{AuthCommand, AuthStage};
+#[cfg(target_os = "android")]
+use music_core::domain::{SourceCommand, SourceSnapshot};
 #[cfg(any(target_os = "android", test))]
 use serde_json::{Value, json};
 #[cfg(target_os = "android")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "android")]
+use crate::runtime::DriverCommand;
 #[cfg(target_os = "android")]
 use std::{
     ffi::{CStr, CString, c_char},
@@ -45,6 +52,33 @@ fn auth_error(message: &str) -> String {
 fn phone_is_valid(phone: &str) -> bool {
     let digits = phone.strip_prefix('+').unwrap_or("");
     (5..=15).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+#[cfg(any(target_os = "android", test))]
+fn bot_music_message(message: &Value, bot_id: i64) -> bool {
+    if message["sender_id"]["user_id"].as_i64() != Some(bot_id) {
+        return false;
+    }
+    let content = &message["content"];
+    if content["@type"] == "messageAudio" {
+        return true;
+    }
+    if content["@type"] != "messageDocument" {
+        return false;
+    }
+    let document = &content["document"];
+    let mime = document["mime_type"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let name = document["file_name"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    mime.starts_with("audio/")
+        || [".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wav"]
+            .iter()
+            .any(|extension| name.ends_with(extension))
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -163,6 +197,7 @@ pub struct TelegramConfig {
     pub database_dir: String,
     pub files_dir: String,
     pub database_key: Vec<u8>,
+    pub source_db: String,
 }
 
 #[cfg(target_os = "android")]
@@ -175,6 +210,7 @@ struct Driver {
     next_extra: i64,
     last_phone: String,
     resend_deadline: Option<Instant>,
+    sources: sources::SourceEngine,
 }
 
 #[cfg(target_os = "android")]
@@ -221,6 +257,9 @@ impl Driver {
             self.handle_state(&value["authorization_state"]);
             return;
         }
+        if self.sources.handle_value(&self.td, &value) {
+            return;
+        }
         let extra = value["@extra"].as_i64();
         if extra.is_some() && extra == self.pending {
             self.pending = None;
@@ -236,6 +275,7 @@ impl Driver {
                     self.snapshot.busy = false;
                     self.snapshot.error = None;
                     self.publish();
+                    self.sources.authorized(&self.td, user_id, &value);
                 }
             } else {
                 self.snapshot.error = Some(
@@ -255,6 +295,7 @@ impl Driver {
 
     fn handle_state(&mut self, state: &Value) {
         let kind = state["@type"].as_str().unwrap_or("");
+        let client_closed = kind == "authorizationStateClosed";
         self.pending = None;
         self.snapshot.busy = false;
         self.snapshot.error = None;
@@ -314,6 +355,30 @@ impl Driver {
             _ => AuthStage::Unsupported { description:"Telegram requested an authentication step this version does not support.".into() },
         };
         self.publish();
+        if matches!(self.snapshot.stage, AuthStage::Phone) {
+            self.sources.signed_out();
+        }
+        if client_closed {
+            self.sources.signed_out();
+            match TdJson::load() {
+                Ok(td) => {
+                    self.td = td;
+                    if self
+                        .td
+                        .send(&json!({"@type":"getAuthorizationState", "@extra":-2}))
+                        .is_err()
+                    {
+                        self.snapshot.error =
+                            Some("Couldn't start a new Telegram session. Restart the app.".into());
+                        self.publish();
+                    }
+                }
+                Err(error) => {
+                    self.snapshot.error = Some(error);
+                    self.publish();
+                }
+            }
+        }
     }
 
     fn tick(&mut self) {
@@ -333,8 +398,9 @@ impl Driver {
 #[cfg(target_os = "android")]
 pub fn run(
     config: TelegramConfig,
-    commands: Receiver<AuthCommand>,
+    commands: Receiver<DriverCommand>,
     updates: watch::Sender<AuthSnapshot>,
+    source_updates: watch::Sender<SourceSnapshot>,
 ) {
     let td = match TdJson::load() {
         Ok(td) => td,
@@ -343,6 +409,7 @@ pub fn run(
             return;
         }
     };
+    let sources = sources::SourceEngine::new(&config.source_db, source_updates);
     let mut driver = Driver {
         td,
         config,
@@ -352,24 +419,54 @@ pub fn run(
         next_extra: 0,
         last_phone: String::new(),
         resend_deadline: None,
+        sources,
     };
     let _ = driver
         .td
         .send(&json!({"@type":"getAuthorizationState", "@extra":-2}));
     loop {
         while let Ok(command) = commands.try_recv() {
-            driver.handle_command(command);
+            match command {
+                DriverCommand::Auth(command) => driver.handle_command(command),
+                DriverCommand::Source(SourceCommand::ChangeAccount) => {
+                    driver.sources.change_account(&driver.td);
+                }
+                DriverCommand::Source(command) => {
+                    driver.sources.handle_command(&driver.td, command)
+                }
+            }
         }
         if let Some(value) = driver.td.receive() {
             driver.handle_value(value);
         }
         driver.tick();
+        driver.sources.drive(&driver.td);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bot_music_detection_excludes_user_audio_and_voice() {
+        assert!(bot_music_message(
+            &json!({"sender_id":{"user_id":7}, "content":{"@type":"messageAudio"}}),
+            7
+        ));
+        assert!(!bot_music_message(
+            &json!({"sender_id":{"user_id":8}, "content":{"@type":"messageAudio"}}),
+            7
+        ));
+        assert!(bot_music_message(
+            &json!({"sender_id":{"user_id":7}, "content":{"@type":"messageDocument", "document":{"mime_type":"audio/flac", "file_name":"track.bin"}}}),
+            7
+        ));
+        assert!(!bot_music_message(
+            &json!({"sender_id":{"user_id":7}, "content":{"@type":"messageVoiceNote"}}),
+            7
+        ));
+    }
 
     #[test]
     fn phone_requires_international_format() {

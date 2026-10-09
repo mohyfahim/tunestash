@@ -45,6 +45,15 @@ if [[ -z "${NDK_HOME:-}" || ! -d "$NDK_HOME/toolchains/llvm/prebuilt" ]]; then
   exit 1
 fi
 
+# libsqlite3-sys compiles its bundled SQLite C source for Android.
+ndk_bin="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+if [[ ! -x "$ndk_bin/aarch64-linux-android24-clang" || ! -x "$ndk_bin/llvm-ar" ]]; then
+  echo "The Android NDK needs ARM64 Clang and llvm-ar." >&2
+  exit 1
+fi
+export CC_aarch64_linux_android="$ndk_bin/aarch64-linux-android24-clang"
+export AR_aarch64_linux_android="$ndk_bin/llvm-ar"
+
 if ! command -v dx >/dev/null || [[ "$(dx --version)" != dioxus\ 0.7.10* ]]; then
   echo "Dioxus CLI 0.7.10 is required." >&2
   exit 1

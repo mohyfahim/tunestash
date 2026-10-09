@@ -4,7 +4,7 @@
 //! playback or downloads.
 
 use music_core::{
-    domain::{AuthCommand, AuthSnapshot},
+    domain::{AuthCommand, AuthSnapshot, SourceCommand, SourceSnapshot},
     ports::TelegramAuth,
 };
 #[cfg(target_os = "android")]
@@ -14,9 +14,15 @@ use tokio::sync::watch;
 
 static AUTH: OnceLock<Result<AuthService, String>> = OnceLock::new();
 
+pub enum DriverCommand {
+    Auth(AuthCommand),
+    Source(SourceCommand),
+}
+
 pub struct AuthService {
-    commands: SyncSender<AuthCommand>,
+    commands: SyncSender<DriverCommand>,
     snapshots: watch::Receiver<AuthSnapshot>,
+    sources: watch::Receiver<SourceSnapshot>,
 }
 
 impl AuthService {
@@ -51,16 +57,19 @@ impl AuthService {
             database_dir,
             files_dir,
             database_key: storage.database_key,
+            source_db: format!("{}/sources.sqlite", storage.files_dir),
         };
         let (command_tx, command_rx) = sync_channel(16);
         let (snapshot_tx, snapshot_rx) = watch::channel(AuthSnapshot::default());
+        let (source_tx, source_rx) = watch::channel(SourceSnapshot::default());
         std::thread::Builder::new()
             .name("tunestash-tdlib".into())
-            .spawn(move || telegram::run(config, command_rx, snapshot_tx))
+            .spawn(move || telegram::run(config, command_rx, snapshot_tx, source_tx))
             .map_err(|_| "Cannot start Telegram connection.".to_string())?;
         Ok(Self {
             commands: command_tx,
             snapshots: snapshot_rx,
+            sources: source_rx,
         })
     }
 
@@ -72,6 +81,20 @@ impl AuthService {
     pub fn subscribe(&self) -> watch::Receiver<AuthSnapshot> {
         self.snapshots.clone()
     }
+
+    pub fn source_snapshot(&self) -> SourceSnapshot {
+        self.sources.borrow().clone()
+    }
+
+    pub fn subscribe_sources(&self) -> watch::Receiver<SourceSnapshot> {
+        self.sources.clone()
+    }
+
+    pub fn submit_source(&self, command: SourceCommand) -> Result<(), String> {
+        self.commands
+            .try_send(DriverCommand::Source(command))
+            .map_err(|_| "Telegram is busy. Wait a moment and retry.".into())
+    }
 }
 
 impl TelegramAuth for AuthService {
@@ -81,7 +104,7 @@ impl TelegramAuth for AuthService {
 
     fn submit(&self, command: AuthCommand) -> Result<(), String> {
         self.commands
-            .try_send(command)
+            .try_send(DriverCommand::Auth(command))
             .map_err(|_| "Telegram is busy. Wait a moment and retry.".into())
     }
 }

@@ -66,10 +66,10 @@ serial is passed. For multiple devices, pass the serial as its argument or set
 `ANDROID_SERIAL` in the environment; set `ANDROID_USER_ID` to install into a
 profile other than user 0. The script launches the app after installation. The
 smoke test should show `Status: ok`, a live process, and the TuneStash splash
-mark followed by the login screen. An already authorized session opens the
-blank dark canvas.
+mark followed by the login screen. An already authorized session opens Music
+Sources after chat discovery completes.
 
-The login and input screens are in `music_app::ui::App`; their CSS is in
+The login, input, and source screens are in `music_app::ui`; their CSS is in
 `crates/music_app/assets/style.css`. TDLib runs on a dedicated Rust thread,
 and Dioxus observes authorization snapshots. Android Keystore protects the
 local TDLib database key. Host tests do not prove a real account login; verify

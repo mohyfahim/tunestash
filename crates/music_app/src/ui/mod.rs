@@ -1,4 +1,6 @@
-//! Single-screen welcome and the inputs requested by Telegram.
+//! Welcome, Telegram authentication, and music source selection.
+
+mod sources;
 
 use crate::runtime::AuthService;
 use dioxus::prelude::*;
@@ -43,6 +45,11 @@ pub fn App() -> Element {
         },
     });
     let mut local_error = use_signal(|| None::<String>);
+    let mut source_snapshot = use_signal(|| {
+        AuthService::global()
+            .map(|service| service.source_snapshot())
+            .unwrap_or_default()
+    });
     let mut phone = use_signal(String::new);
     let mut code = use_signal(String::new);
     let mut email = use_signal(String::new);
@@ -56,6 +63,16 @@ pub fn App() -> Element {
         let mut changes = service.subscribe();
         while changes.changed().await.is_ok() {
             snapshot.set(changes.borrow_and_update().clone());
+        }
+    });
+
+    use_future(move || async move {
+        let Ok(service) = AuthService::global() else {
+            return;
+        };
+        let mut changes = service.subscribe_sources();
+        while changes.changed().await.is_ok() {
+            source_snapshot.set(changes.borrow_and_update().clone());
         }
     });
 
@@ -156,12 +173,13 @@ pub fn App() -> Element {
 
     rsx! {
         document::Style { {include_str!("../../assets/style.css")} }
-        if matches!(current.stage, AuthStage::Ready { .. })
-            || (!*started.read()
+        if matches!(current.stage, AuthStage::Ready { .. }) {
+            sources::SourceView { snapshot: source_snapshot.read().clone(), onboarding: true }
+        } else if !*started.read()
                 && matches!(current.stage, AuthStage::Connecting)
-                && current.error.is_none())
+                && current.error.is_none()
         {
-            main { class: "signed-in-canvas", aria_label: if matches!(current.stage, AuthStage::Ready { .. }) { "Music sources will appear here" } else { "Connecting to Telegram" } }
+            main { class: "signed-in-canvas", aria_label: "Connecting to Telegram" }
         } else if !*started.read() {
             main { class: "welcome-screen",
                 div { class: "welcome-top",
