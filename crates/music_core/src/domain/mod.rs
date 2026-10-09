@@ -72,13 +72,31 @@ pub struct SourceChat {
     pub subtitle: String,
     pub kind: SourceKind,
     pub selected: bool,
+    pub music: MusicCheck,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MusicCheck {
+    Unchecked,
+    Checking,
+    Found,
+    Empty,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailedChatCheck {
+    pub chat_id: i64,
+    pub operation: String,
+    pub code: i64,
+    pub reason: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiscoveryStage {
     Waiting,
     LoadingChats,
-    CheckingBots,
+    CheckingMusic,
     Complete,
     Failed,
 }
@@ -88,9 +106,10 @@ pub struct SourceSnapshot {
     pub account_id: Option<i64>,
     pub account_name: String,
     pub stage: DiscoveryStage,
-    pub checked_bots: usize,
-    pub total_bots: usize,
+    pub checked_chats: usize,
+    pub total_chats: usize,
     pub failed_checks: usize,
+    pub failed_chats: Vec<FailedChatCheck>,
     pub chats: Vec<SourceChat>,
     pub error: Option<String>,
     pub show_partial: bool,
@@ -103,9 +122,10 @@ impl Default for SourceSnapshot {
             account_id: None,
             account_name: String::new(),
             stage: DiscoveryStage::Waiting,
-            checked_bots: 0,
-            total_bots: 0,
+            checked_chats: 0,
+            total_chats: 0,
             failed_checks: 0,
+            failed_chats: Vec::new(),
             chats: Vec::new(),
             error: None,
             show_partial: false,
@@ -127,19 +147,21 @@ impl SourceSnapshot {
     pub fn default_chats(&self) -> impl Iterator<Item = &SourceChat> {
         self.chats
             .iter()
-            .filter(|chat| chat.kind != SourceKind::OtherChat)
+            .filter(|chat| chat.music == MusicCheck::Found && chat.kind != SourceKind::OtherChat)
     }
 
     pub fn selected_chats(&self) -> impl Iterator<Item = &SourceChat> {
-        self.chats
-            .iter()
-            .filter(|chat| chat.selected && chat.kind == SourceKind::OtherChat)
+        self.chats.iter().filter(|chat| {
+            chat.music == MusicCheck::Found && chat.selected && chat.kind == SourceKind::OtherChat
+        })
     }
 
     pub fn available_chats(&self) -> impl Iterator<Item = &SourceChat> {
-        self.chats
-            .iter()
-            .filter(|chat| !chat.selected && chat.kind != SourceKind::SavedMessages)
+        self.chats.iter().filter(|chat| {
+            chat.music == MusicCheck::Found
+                && !chat.selected
+                && chat.kind != SourceKind::SavedMessages
+        })
     }
 }
 
@@ -156,6 +178,7 @@ mod source_tests {
             subtitle: String::new(),
             kind: SourceKind::OtherChat,
             selected: false,
+            music: MusicCheck::Found,
         });
         assert_eq!(snapshot.available_chats().count(), 1);
         assert_eq!(snapshot.selected_chats().count(), 0);
@@ -175,8 +198,32 @@ mod source_tests {
             subtitle: String::new(),
             kind: SourceKind::PersonalChannel,
             selected: true,
+            music: MusicCheck::Found,
         });
         assert_eq!(snapshot.default_chats().count(), 1);
+        assert_eq!(snapshot.selected_chats().count(), 0);
+        assert_eq!(snapshot.available_chats().count(), 0);
+    }
+
+    #[test]
+    fn unverified_and_empty_chats_are_hidden_from_every_section() {
+        let mut snapshot = SourceSnapshot::default();
+        for (chat_id, music, selected) in [
+            (1, MusicCheck::Unchecked, false),
+            (2, MusicCheck::Checking, true),
+            (3, MusicCheck::Empty, false),
+            (4, MusicCheck::Failed, true),
+        ] {
+            snapshot.chats.push(SourceChat {
+                chat_id,
+                title: format!("Chat {chat_id}"),
+                subtitle: String::new(),
+                kind: SourceKind::OtherChat,
+                selected,
+                music,
+            });
+        }
+        assert_eq!(snapshot.default_chats().count(), 0);
         assert_eq!(snapshot.selected_chats().count(), 0);
         assert_eq!(snapshot.available_chats().count(), 0);
     }

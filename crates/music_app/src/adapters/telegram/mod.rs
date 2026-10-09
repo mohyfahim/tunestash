@@ -1,7 +1,20 @@
 //! TDLib C/JSON client. Only this module touches unsafe FFI.
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod sources;
+
+#[cfg(all(test, not(target_os = "android")))]
+#[allow(dead_code)]
+struct TdJson;
+
+#[cfg(all(test, not(target_os = "android")))]
+#[allow(dead_code)]
+impl TdJson {
+    fn send(&self, _value: &Value) -> Result<(), String> {
+        Ok(())
+    }
+}
 
 #[cfg(target_os = "android")]
 use music_core::domain::AuthSnapshot;
@@ -55,10 +68,7 @@ fn phone_is_valid(phone: &str) -> bool {
 }
 
 #[cfg(any(target_os = "android", test))]
-fn bot_music_message(message: &Value, bot_id: i64) -> bool {
-    if message["sender_id"]["user_id"].as_i64() != Some(bot_id) {
-        return false;
-    }
+fn playable_music_message(message: &Value) -> bool {
     let content = &message["content"];
     if content["@type"] == "messageAudio" {
         return true;
@@ -79,6 +89,36 @@ fn bot_music_message(message: &Value, bot_id: i64) -> bool {
         || [".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wav"]
             .iter()
             .any(|extension| name.ends_with(extension))
+}
+
+#[cfg(any(target_os = "android", test))]
+enum MusicProbePage {
+    Found(i64),
+    Next(i64),
+    Exhausted,
+    Invalid(&'static str),
+}
+
+#[cfg(any(target_os = "android", test))]
+fn music_probe_page(value: &Value, before: i64) -> MusicProbePage {
+    let Some(messages) = value["messages"].as_array() else {
+        return MusicProbePage::Invalid("Telegram returned an invalid message page");
+    };
+    if let Some(message) = messages
+        .iter()
+        .find(|message| playable_music_message(message))
+    {
+        return message["id"].as_i64().map_or(
+            MusicProbePage::Invalid("Telegram returned a message without an ID"),
+            MusicProbePage::Found,
+        );
+    }
+    match value["next_from_message_id"].as_i64() {
+        Some(0) => MusicProbePage::Exhausted,
+        Some(next) if next > 0 && next != before => MusicProbePage::Next(next),
+        Some(_) => MusicProbePage::Invalid("Telegram repeated a pagination cursor"),
+        None => MusicProbePage::Invalid("Telegram returned no pagination cursor"),
+    }
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -449,22 +489,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bot_music_detection_excludes_user_audio_and_voice() {
-        assert!(bot_music_message(
+    fn music_detection_accepts_any_sender_and_excludes_non_audio() {
+        assert!(playable_music_message(
             &json!({"sender_id":{"user_id":7}, "content":{"@type":"messageAudio"}}),
-            7
         ));
-        assert!(!bot_music_message(
+        assert!(playable_music_message(
             &json!({"sender_id":{"user_id":8}, "content":{"@type":"messageAudio"}}),
-            7
         ));
-        assert!(bot_music_message(
+        assert!(playable_music_message(
             &json!({"sender_id":{"user_id":7}, "content":{"@type":"messageDocument", "document":{"mime_type":"audio/flac", "file_name":"track.bin"}}}),
-            7
         ));
-        assert!(!bot_music_message(
+        assert!(playable_music_message(
+            &json!({"content":{"@type":"messageDocument", "document":{"mime_type":"application/octet-stream", "file_name":"song.mp3"}}}),
+        ));
+        assert!(!playable_music_message(
             &json!({"sender_id":{"user_id":7}, "content":{"@type":"messageVoiceNote"}}),
-            7
+        ));
+        assert!(!playable_music_message(
+            &json!({"content":{"@type":"messageDocument", "document":{"mime_type":"application/pdf", "file_name":"notes.pdf"}}}),
+        ));
+        assert!(!playable_music_message(
+            &json!({"content":{"@type":"messageText", "text":{"text":"https://example.com/song.mp3"}}}),
+        ));
+    }
+
+    #[test]
+    fn music_probe_uses_tdlib_cursor_until_history_is_exhausted() {
+        let first = json!({"messages":[{"id":500,"content":{"@type":"messageDocument", "document":{"mime_type":"application/pdf", "file_name":"notes.pdf"}}}],"next_from_message_id":400});
+        assert!(matches!(
+            music_probe_page(&first, 0),
+            MusicProbePage::Next(400)
+        ));
+        let last = json!({"messages":[],"next_from_message_id":0});
+        assert!(matches!(
+            music_probe_page(&last, 400),
+            MusicProbePage::Exhausted
+        ));
+        let found = json!({"messages":[{"id":350,"content":{"@type":"messageAudio"}}],"next_from_message_id":200});
+        assert!(matches!(
+            music_probe_page(&found, 400),
+            MusicProbePage::Found(350)
+        ));
+        assert!(matches!(
+            music_probe_page(&first, 400),
+            MusicProbePage::Invalid("Telegram repeated a pagination cursor")
         ));
     }
 

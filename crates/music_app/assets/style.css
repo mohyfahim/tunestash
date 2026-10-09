@@ -144,6 +144,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--lime); outl
 .discovery-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; padding: 11px 14px; border-radius: 12px; background: var(--source-surface-raised); color: var(--source-secondary); font-size: 12px; }
 .discovery-banner button { min-height: 40px; border: 0; background: none; color: var(--source-violet); font-weight: 700; }
 .source-message { margin: 16px 0 0; padding: 12px 14px; border-radius: 12px; background: #3b2322; color: #ffb4ac; font-size: 13px; line-height: 1.4; }
+.failed-chat-details { margin-top: 10px; padding: 12px 14px; border-radius: 12px; background: var(--source-surface-raised); color: var(--source-secondary); font-size: 12px; }
+.failed-chat-details summary { cursor: pointer; color: var(--source-violet); font-weight: 700; }
+.failed-chat-details ul { margin: 10px 0 0; padding-left: 18px; }
+.failed-chat-details li { margin-top: 9px; line-height: 1.4; }
+.failed-chat-details li strong, .failed-chat-details li span { display: block; overflow-wrap: anywhere; }
 .source-loading-screen { display: grid; place-items: center; padding: 32px 24px; }
 .source-loading-content { width: min(100%, 390px); text-align: center; }
 .source-loading-mark { display: grid; place-items: center; width: 86px; height: 86px; margin: 0 auto 28px; border-radius: 25px; color: var(--source-accent); background: var(--source-surface); }

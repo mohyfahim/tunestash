@@ -9,13 +9,24 @@ Updated: 2026-10-09
 - Phone-number, verification-code, email-code, and Telegram two-step-password
   forms. TDLib drives the form shown for the current authorization state.
 - A dark Music Sources screen after authorization. Its loading page reports
-  chat discovery and bot-check progress; the source screen shows Saved
-  Messages, created channels, confirmed music bots, selected chats, and
-  searchable unselected chats from Main and Archive.
+  chat discovery and music-check progress. Telegram Audio and Documents
+  identified as playable audio are checked throughout each accessible chat's
+  searchable history, following TDLib pagination. Voice notes, links, and
+  text-only messages do not qualify. Only confirmed music sources appear in
+  Default Sources, Selected Chats, or searchable All Chats.
+- Main and Archive chat loading discovers candidates, including archived
+  chats. The candidate IDs come from TDLib's `getChats` results for those two
+  lists; other cached chat objects are excluded. Some accessible channels on
+  the test account have empty per-chat list fields, so those fields are not
+  used as the membership check. Inaccessible unselected chats stay hidden;
+  access failures for saved selections keep their choice intact and can be
+  retried.
 - Source choices persist by account and chat ID in SQLite. Selecting a regular
   chat moves it from All Chats to Selected Chats; selected default sources stay
-  in Default Sources. Stored names and kinds remain visible while Telegram
-  details are loading.
+  in Default Sources. A complete music check that finds no qualifying file
+  disables a previously saved choice; failed checks preserve it and keep the
+  chat hidden until verification succeeds. New music messages and relevant
+  edits or deletions update eligibility.
 - A Change account confirmation starts TDLib logout, clears the account's
   source choices after TDLib closes, and creates a fresh TDLib client for the
   next login. It is only exposed during onboarding.
@@ -39,11 +50,27 @@ Updated: 2026-10-09
   background and inline CSS removed the bright frame in a repeat recording.
 - Host source-choice and classification tests pass. Android-target Clippy and
   the final APK build pass with bundled SQLite.
+- Host tests cover audio and Document eligibility, sender independence,
+  pagination, section placement, account-scoped persistence, and the different
+  persistence outcomes for empty and failed scans. The Android target passes
+  Clippy with warnings denied and the APK builds successfully.
+- Samsung SM-A256E, Android 14: the music-only APK installed and scanned live
+  Telegram history progressively. Saved Messages, Gym Musics (a created
+  channel), and Spotify Save Bot appeared after music was confirmed. The
+  scan's live progress count and three-section page were visible. An initial
+  broad scan included over 3,000 cached chat objects; the corrected Main and
+  Archive list query reduced candidates to 636 on this account. The corrected
+  scan completed without a failure banner, and searching All Chats for
+  GeekACK returned no match. Saved Messages and a selected regular chat were
+  still selected after reinstalling the corrected APK and rescanning.
 - Samsung SM-A256E, Android 14: the final APK installed and resumed the owner's
   existing Telegram session. Live discovery finished, displayed hundreds of
   chats, identified user-created channels and music-sending bots, and showed
-  the loading, recovery, and three-section source page. Nine chats could not
-  be checked on this account; the page reports the gap and offers Retry.
+  the loading, recovery, and three-section source page. An initial scan left
+  nine bot document histories unchecked because pagination supplied an invalid
+  message ID. Discovery now uses TDLib's returned `next_from_message_id`;
+  a repeat scan on the device finished without failed checks. Failed checks,
+  if any occur later, can be expanded to show the chat and Telegram error.
 - On that device, a temporary Saved Messages selection survived a force-stop
   and cold relaunch. A temporary regular chat moved from All Chats to Selected
   Chats on selection. Both test choices were returned to their original off

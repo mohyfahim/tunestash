@@ -1,7 +1,7 @@
 //! Account-scoped source choices. This connection is owned by the service
 //! thread; Dioxus never reads SQLite while rendering.
 
-use music_core::domain::{SourceChat, SourceKind};
+use music_core::domain::{MusicCheck, SourceChat, SourceKind};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
@@ -108,6 +108,7 @@ impl SourceStore {
                     .into(),
                     kind,
                     selected: true,
+                    music: MusicCheck::Unchecked,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -145,6 +146,7 @@ mod tests {
                 subtitle: String::new(),
                 kind: SourceKind::MusicBot,
                 selected: true,
+                music: MusicCheck::Found,
             };
             store.set_selected(10, &chat, true).unwrap();
             store.set_selected(10, &chat, true).unwrap();
@@ -156,6 +158,10 @@ mod tests {
             SourceKind::MusicBot
         );
         assert!(!store.selected(11, 99).unwrap());
+        let chat = store.selected_chats(10).unwrap().remove(0);
+        store.set_selected(10, &chat, false).unwrap();
+        assert!(!store.selected(10, 99).unwrap());
+        assert!(store.selected_chats(10).unwrap().is_empty());
         store.clear_account(10).unwrap();
         assert!(!store.selected(10, 99).unwrap());
         drop(store);

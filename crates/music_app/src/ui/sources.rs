@@ -11,6 +11,15 @@ fn dispatch(command: SourceCommand, mut error: Signal<Option<String>>) {
     }
 }
 
+fn failed_title(snapshot: &SourceSnapshot, chat_id: i64) -> &str {
+    snapshot
+        .chats
+        .iter()
+        .find(|chat| chat.chat_id == chat_id)
+        .map(|chat| chat.title.as_str())
+        .unwrap_or("Unknown chat")
+}
+
 #[component]
 pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
     let mut query = use_signal(String::new);
@@ -20,7 +29,7 @@ pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
     let error = use_signal(|| None::<String>);
     let loading = matches!(
         snapshot.stage,
-        DiscoveryStage::Waiting | DiscoveryStage::LoadingChats | DiscoveryStage::CheckingBots
+        DiscoveryStage::Waiting | DiscoveryStage::LoadingChats | DiscoveryStage::CheckingMusic
     ) && !snapshot.show_partial;
     let failed_loading = snapshot.stage == DiscoveryStage::Failed && !snapshot.show_partial;
     let all_defaults: Vec<_> = snapshot.default_chats().cloned().collect();
@@ -51,16 +60,10 @@ pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
         .collect();
     let progress = match snapshot.stage {
         DiscoveryStage::Waiting => "Preparing your Telegram chats".to_string(),
-        DiscoveryStage::LoadingChats => format!(
-            "Loading chats · {} found",
-            snapshot.chats.len().saturating_sub(1)
-        ),
-        DiscoveryStage::CheckingBots if snapshot.total_bots == 0 => {
-            "Identifying your channels and bots".into()
-        }
-        DiscoveryStage::CheckingBots => format!(
-            "Checking bot conversations · {} of {} checked",
-            snapshot.checked_bots, snapshot.total_bots
+        DiscoveryStage::LoadingChats => "Loading Telegram chats".into(),
+        DiscoveryStage::CheckingMusic => format!(
+            "Checking music files · {} of {} chats checked",
+            snapshot.checked_chats, snapshot.total_chats
         ),
         DiscoveryStage::Complete if snapshot.failed_checks > 0 => {
             "Discovery finished with gaps".into()
@@ -78,13 +81,26 @@ pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
                         path { d: "M22 33h5m5-10v20m5-15v10m5-15v20", stroke: "currentColor", stroke_width: "3", stroke_linecap: "round" }
                     } }
                     h1 { if snapshot.signing_out { "Changing account" } else { "Finding your music sources" } }
-                    p { class: "source-loading-description", if snapshot.signing_out { "Ending this Telegram session…" } else { "Looking through your chats to find your channels and bots that have sent music." } }
+                    p { class: "source-loading-description", if snapshot.signing_out { "Ending this Telegram session…" } else { "Looking through your chats for playable music files." } }
                     if !snapshot.signing_out {
                         div { class: "source-loading-line", role: "progressbar", aria_label: "Finding Telegram chats" }
                         p { class: "source-progress", role: "status", "{progress}" }
                     }
                     if let Some(message) = snapshot.error.as_ref() {
                         p { class: "source-message", role: "alert", "{message}" }
+                    }
+                    if !snapshot.failed_chats.is_empty() {
+                        details { class: "failed-chat-details",
+                            summary { "Show failed chat checks ({snapshot.failed_chats.len()})" }
+                            ul {
+                                for failure in &snapshot.failed_chats {
+                                    li {
+                                        strong { dir: "auto", "{failed_title(&snapshot, failure.chat_id)}" }
+                                        span { "Chat ID {failure.chat_id} · {failure.operation} · Telegram {failure.code}: {failure.reason}" }
+                                    }
+                                }
+                            }
+                        }
                     }
                     if let Some(message) = error.read().as_ref() {
                         p { class: "source-message", role: "alert", "{message}" }
@@ -115,16 +131,29 @@ pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
                             button { class: "source-link", r#type: "button", onclick: move |_| confirm_change.set(true), "Change" }
                         }
                     }
-                    if snapshot.stage == DiscoveryStage::Failed || snapshot.stage == DiscoveryStage::CheckingBots || snapshot.failed_checks > 0 {
+                    if snapshot.stage == DiscoveryStage::Failed || snapshot.stage == DiscoveryStage::CheckingMusic || snapshot.failed_checks > 0 {
                         div { class: "discovery-banner", role: "status",
                             span { "{progress}" }
-                            if snapshot.stage == DiscoveryStage::Failed || snapshot.failed_checks > 0 {
+                            if snapshot.stage == DiscoveryStage::Failed || (snapshot.stage == DiscoveryStage::Complete && snapshot.failed_checks > 0) {
                                 button { r#type: "button", onclick: move |_| dispatch(SourceCommand::RetryDiscovery, error), "Retry" }
                             }
                         }
                     }
                     if let Some(message) = snapshot.error.as_ref() {
                         p { class: "source-message", role: "alert", "{message}" }
+                    }
+                    if !snapshot.failed_chats.is_empty() {
+                        details { class: "failed-chat-details",
+                            summary { "Show failed chat checks ({snapshot.failed_chats.len()})" }
+                            ul {
+                                for failure in &snapshot.failed_chats {
+                                    li {
+                                        strong { dir: "auto", "{failed_title(&snapshot, failure.chat_id)}" }
+                                        span { "Chat ID {failure.chat_id} · {failure.operation} · Telegram {failure.code}: {failure.reason}" }
+                                    }
+                                }
+                            }
+                        }
                     }
                     if let Some(message) = error.read().as_ref() {
                         p { class: "source-message", role: "alert", "{message}" }
@@ -134,6 +163,7 @@ pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
                         div { class: "default-list",
                             for chat in defaults { SourceRow { key: "default-{chat.chat_id}", chat, compact: false } }
                         }
+                        if default_count == 0 { p { class: "source-empty", "No default sources with music found yet." } }
                         if default_count > 5 {
                             button { class: "source-expand", r#type: "button", onclick: move |_| expanded_defaults.toggle(),
                                 if *expanded_defaults.read() { "Show fewer default sources" } else { "Show all {default_count} default sources" }
@@ -145,7 +175,7 @@ pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
                             div { h2 { "Selected Chats" } p { "Other chats you've chosen for your library." } }
                             a { href: "#available-chats", class: "source-link", "+ Add source" }
                         }
-                        if selected.is_empty() { p { class: "source-empty", "Chats you add below will appear here." } }
+                        if selected.is_empty() { p { class: "source-empty", "Music chats you add below will appear here." } }
                         else { div { class: "chat-list", for chat in selected { SourceRow { key: "selected-{chat.chat_id}", chat, compact: true } } } }
                     }
                     section { class: "sources-section", id: "available-chats", aria_label: "All chats",
@@ -155,7 +185,7 @@ pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
                             input { r#type: "search", placeholder: "Search chats, channels, or bots", aria_label: "Search chats, channels, or bots", value: "{query}", oninput: move |event| query.set(event.value()) }
                         }
                         if available.is_empty() {
-                            p { class: "source-empty", if term.is_empty() { "No unselected chats are available." } else { "No chats match your search." } }
+                            p { class: "source-empty", if term.is_empty() { if snapshot.stage == DiscoveryStage::CheckingMusic { "More music chats may appear as discovery continues." } else { "No unselected chats with music were found." } } else { "No music chats match your search." } }
                         } else {
                             div { class: "chat-list", for chat in available { SourceRow { key: "available-{chat.chat_id}", chat, compact: true } } }
                             if available_count > *visible_chat_count.read() {

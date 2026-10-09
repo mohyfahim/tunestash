@@ -1,9 +1,12 @@
 use super::TdJson;
 use crate::adapters::sqlite::SourceStore;
-use music_core::domain::{DiscoveryStage, SourceChat, SourceCommand, SourceKind, SourceSnapshot};
+use music_core::domain::{
+    DiscoveryStage, FailedChatCheck, MusicCheck, SourceChat, SourceCommand, SourceKind,
+    SourceSnapshot,
+};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::Path,
     time::{Duration, Instant},
 };
@@ -15,6 +18,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
 enum Job {
     LoadMain,
     LoadArchive,
+    ListMain,
+    ListArchive,
+    GetChat {
+        chat_id: i64,
+    },
     User {
         chat_id: i64,
         user_id: i64,
@@ -25,20 +33,33 @@ enum Job {
     },
     Audio {
         chat_id: i64,
-        bot_id: i64,
         before: i64,
+        epoch: u64,
     },
     Document {
         chat_id: i64,
-        bot_id: i64,
         before: i64,
+        epoch: u64,
     },
+}
+
+impl Job {
+    fn chat_id(&self) -> Option<i64> {
+        match self {
+            Self::LoadMain | Self::LoadArchive | Self::ListMain | Self::ListArchive => None,
+            Self::GetChat { chat_id }
+            | Self::User { chat_id, .. }
+            | Self::Channel { chat_id, .. }
+            | Self::Audio { chat_id, .. }
+            | Self::Document { chat_id, .. } => Some(*chat_id),
+        }
+    }
 }
 
 #[derive(Clone)]
 struct ChatMeta {
-    chat_id: i64,
     title: String,
+    subtitle: String,
     private_user: Option<i64>,
     supergroup: Option<i64>,
 }
@@ -48,11 +69,16 @@ pub struct SourceEngine {
     snapshot: SourceSnapshot,
     updates: watch::Sender<SourceSnapshot>,
     chats: BTreeMap<i64, ChatMeta>,
+    main_ids: BTreeSet<i64>,
+    archive_ids: BTreeSet<i64>,
+    lists_ready: bool,
     jobs: VecDeque<Job>,
     active: Option<(i64, Job, Instant)>,
     next_extra: i64,
     logout_account: Option<i64>,
     initial_complete: bool,
+    scan_epochs: BTreeMap<i64, u64>,
+    proof_messages: BTreeMap<i64, i64>,
 }
 
 impl SourceEngine {
@@ -70,11 +96,16 @@ impl SourceEngine {
             snapshot,
             updates,
             chats: BTreeMap::new(),
+            main_ids: BTreeSet::new(),
+            archive_ids: BTreeSet::new(),
+            lists_ready: false,
             jobs: VecDeque::new(),
             active: None,
             next_extra: 1000,
             logout_account: None,
             initial_complete: false,
+            scan_epochs: BTreeMap::new(),
+            proof_messages: BTreeMap::new(),
         }
     }
 
@@ -106,41 +137,16 @@ impl SourceEngine {
         };
         self.jobs.clear();
         self.active = None;
+        self.chats.remove(&user_id);
         self.add_chat(SourceChat {
             chat_id: user_id,
             title: "Saved Messages".into(),
             subtitle: "Your personal Telegram archive".into(),
             kind: SourceKind::SavedMessages,
             selected: false,
+            music: MusicCheck::Unchecked,
         });
-        let cached: Vec<_> = self.chats.values().cloned().collect();
-        for chat in cached {
-            if chat.chat_id == user_id {
-                continue;
-            }
-            self.add_chat(SourceChat {
-                chat_id: chat.chat_id,
-                title: chat.title,
-                subtitle: "Telegram chat".into(),
-                kind: SourceKind::OtherChat,
-                selected: false,
-            });
-        }
-        if let Some(store) = &self.store {
-            match store.selected_chats(user_id) {
-                Ok(chats) => {
-                    for chat in chats {
-                        if chat.chat_id != user_id {
-                            self.add_chat(chat);
-                        }
-                    }
-                }
-                Err(_) => {
-                    self.fail("Can't read saved sources. Check device storage and retry.");
-                    return;
-                }
-            }
-        } else {
+        if self.store.is_none() {
             self.fail("Source storage is unavailable. Restart the app after freeing device space.");
             return;
         }
@@ -163,6 +169,7 @@ impl SourceEngine {
             .iter_mut()
             .find(|item| item.chat_id == chat.chat_id)
         {
+            chat.music = existing.music;
             *existing = chat;
         } else {
             self.snapshot.chats.push(chat);
@@ -186,12 +193,24 @@ impl SourceEngine {
         self.jobs.clear();
         self.active = None;
         self.initial_complete = false;
+        self.lists_ready = false;
+        self.main_ids.clear();
+        self.archive_ids.clear();
         self.snapshot.stage = DiscoveryStage::LoadingChats;
-        self.snapshot.checked_bots = 0;
-        self.snapshot.total_bots = 0;
+        self.snapshot.checked_chats = 0;
+        self.snapshot.total_chats = 0;
         self.snapshot.failed_checks = 0;
+        self.snapshot.failed_chats.clear();
         self.snapshot.error = None;
         self.snapshot.show_partial = false;
+        self.scan_epochs.clear();
+        self.proof_messages.clear();
+        self.snapshot
+            .chats
+            .retain(|chat| chat.kind == SourceKind::SavedMessages);
+        for chat in &mut self.snapshot.chats {
+            chat.music = MusicCheck::Unchecked;
+        }
         self.jobs.push_back(Job::LoadMain);
         self.publish();
     }
@@ -206,7 +225,7 @@ impl SourceEngine {
                     .snapshot
                     .chats
                     .iter()
-                    .find(|chat| chat.chat_id == chat_id)
+                    .find(|chat| chat.chat_id == chat_id && chat.music == MusicCheck::Found)
                     .cloned()
                 else {
                     return;
@@ -237,6 +256,10 @@ impl SourceEngine {
             SourceCommand::RetryDiscovery => {
                 if self.store.is_none() {
                     self.fail("Source storage is unavailable. Restart the app after freeing device space.");
+                } else if self.snapshot.stage == DiscoveryStage::Complete
+                    && !self.snapshot.failed_chats.is_empty()
+                {
+                    self.retry_failed();
                 } else {
                     self.restart(td);
                 }
@@ -279,6 +302,11 @@ impl SourceEngine {
         self.jobs.clear();
         self.active = None;
         self.chats.clear();
+        self.main_ids.clear();
+        self.archive_ids.clear();
+        self.lists_ready = false;
+        self.scan_epochs.clear();
+        self.proof_messages.clear();
         self.snapshot = SourceSnapshot::default();
         self.publish();
     }
@@ -311,17 +339,37 @@ impl SourceEngine {
             raw_title
         }
         .to_string();
-        let is_new = !self.chats.contains_key(&chat_id);
+        let subtitle = match kind {
+            "chatTypePrivate" => "Private chat",
+            "chatTypeSupergroup" => "Channel or group",
+            "chatTypeBasicGroup" => "Group chat",
+            _ => "Telegram chat",
+        };
         self.chats.insert(
             chat_id,
             ChatMeta {
-                chat_id,
-                title: title.clone(),
+                title,
+                subtitle: subtitle.into(),
                 private_user,
                 supergroup,
             },
         );
-        if self.snapshot.account_id.is_none() {
+        if !self.lists_ready || !self.is_listed(chat_id) {
+            return;
+        }
+        self.include_cached_chat(chat_id);
+    }
+
+    fn is_listed(&self, chat_id: i64) -> bool {
+        self.main_ids.contains(&chat_id) || self.archive_ids.contains(&chat_id)
+    }
+
+    fn include_cached_chat(&mut self, chat_id: i64) {
+        let Some(meta) = self.chats.get(&chat_id).cloned() else {
+            self.jobs.push_back(Job::GetChat { chat_id });
+            return;
+        };
+        if !self.is_listed(chat_id) || self.snapshot.account_id == Some(chat_id) {
             return;
         }
         let existing = self
@@ -330,51 +378,66 @@ impl SourceEngine {
             .iter()
             .find(|item| item.chat_id == chat_id)
             .cloned();
+        let is_new = existing.is_none();
         self.add_chat(SourceChat {
             chat_id,
-            title,
+            title: meta.title,
             subtitle: existing
                 .as_ref()
                 .filter(|item| item.kind != SourceKind::OtherChat)
                 .map(|item| item.subtitle.clone())
-                .unwrap_or_else(|| {
-                    match kind {
-                        "chatTypePrivate" => "Private chat",
-                        "chatTypeSupergroup" => "Channel or group",
-                        "chatTypeBasicGroup" => "Group chat",
-                        _ => "Telegram chat",
-                    }
-                    .into()
-                }),
+                .unwrap_or(meta.subtitle),
             kind: existing.map_or(SourceKind::OtherChat, |item| item.kind),
             selected: false,
+            music: MusicCheck::Unchecked,
         });
         if is_new
             && matches!(
                 self.snapshot.stage,
-                DiscoveryStage::CheckingBots | DiscoveryStage::Complete
+                DiscoveryStage::CheckingMusic | DiscoveryStage::Complete
             )
         {
-            if let Some(user_id) = private_user {
+            if let Some(user_id) = meta.private_user {
                 self.jobs.push_back(Job::User { chat_id, user_id });
             }
-            if let Some(supergroup_id) = supergroup {
+            if let Some(supergroup_id) = meta.supergroup {
                 self.jobs.push_back(Job::Channel {
                     chat_id,
                     supergroup_id,
                 });
             }
-            if !self.jobs.is_empty() {
-                if self.initial_complete {
-                    self.snapshot.show_partial = true;
-                }
-                self.snapshot.stage = DiscoveryStage::CheckingBots;
-                self.publish();
+            self.queue_probe(chat_id);
+            if self.initial_complete {
+                self.snapshot.show_partial = true;
             }
+            self.snapshot.stage = DiscoveryStage::CheckingMusic;
+            self.refresh_progress();
+            self.publish();
         }
     }
 
     pub fn handle_value(&mut self, _td: &TdJson, value: &Value) -> bool {
+        if value["@type"] == "updateChatPosition" {
+            if let Some(chat_id) = value["chat_id"].as_i64() {
+                let present = value["position"]["order"]
+                    .as_i64()
+                    .is_some_and(|order| order > 0);
+                self.update_list_membership(chat_id, &value["position"]["list"], present);
+            }
+            return true;
+        }
+        if value["@type"] == "updateChatAddedToList"
+            || value["@type"] == "updateChatRemovedFromList"
+        {
+            if let Some(chat_id) = value["chat_id"].as_i64() {
+                self.update_list_membership(
+                    chat_id,
+                    &value["chat_list"],
+                    value["@type"] == "updateChatAddedToList",
+                );
+            }
+            return true;
+        }
         if value["@type"] == "updateNewChat" {
             self.ingest_chat(&value["chat"]);
             return true;
@@ -382,6 +445,41 @@ impl SourceEngine {
         if value["@type"] == "updateChatTitle" {
             if let (Some(id), Some(title)) = (value["chat_id"].as_i64(), value["title"].as_str()) {
                 self.set_title(id, title);
+            }
+            return true;
+        }
+        if value["@type"] == "updateNewMessage" {
+            let message = &value["message"];
+            if super::playable_music_message(message)
+                && let (Some(chat_id), Some(message_id)) =
+                    (message["chat_id"].as_i64(), message["id"].as_i64())
+            {
+                self.invalidate_probe(chat_id);
+                self.mark_found(chat_id, message_id);
+            }
+            return true;
+        }
+        if value["@type"] == "updateMessageContent" {
+            if let (Some(chat_id), Some(message_id)) =
+                (value["chat_id"].as_i64(), value["message_id"].as_i64())
+            {
+                if super::playable_music_message(&json!({"content":value["new_content"]})) {
+                    self.invalidate_probe(chat_id);
+                    self.mark_found(chat_id, message_id);
+                } else if self.proof_messages.get(&chat_id) == Some(&message_id) {
+                    self.rescan_chat(chat_id);
+                }
+            }
+            return true;
+        }
+        if value["@type"] == "updateDeleteMessages" {
+            if let Some(chat_id) = value["chat_id"].as_i64()
+                && let Some(proof) = self.proof_messages.get(&chat_id)
+                && value["message_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id.as_i64() == Some(*proof)))
+            {
+                self.rescan_chat(chat_id);
             }
             return true;
         }
@@ -401,30 +499,60 @@ impl SourceEngine {
             return false;
         }
         self.active = None;
+        if let Job::Audio { chat_id, epoch, .. } | Job::Document { chat_id, epoch, .. } = &job
+            && self.scan_epochs.get(chat_id).copied().unwrap_or(0) != *epoch
+        {
+            return true;
+        }
         if value["@type"] == "error" {
             if value["code"] == 404 && matches!(job, Job::LoadMain | Job::LoadArchive) {
                 self.end_chat_list(job);
             } else {
                 let code = value["code"].as_i64().unwrap_or(0);
                 let job_name = match job {
-                    Job::LoadMain | Job::LoadArchive => "chat list",
+                    Job::LoadMain | Job::LoadArchive | Job::ListMain | Job::ListArchive => {
+                        "chat list"
+                    }
+                    Job::GetChat { .. } => "chat details",
                     Job::User { .. } => "user",
                     Job::Channel { .. } => "channel",
-                    Job::Audio { .. } | Job::Document { .. } => "bot history",
+                    Job::Audio { .. } => "audio history",
+                    Job::Document { .. } => "document history",
                 };
-                eprintln!("TuneStash source discovery: {job_name} request failed with code {code}");
-                if matches!(job, Job::LoadMain | Job::LoadArchive) {
+                if matches!(
+                    job,
+                    Job::LoadMain | Job::LoadArchive | Job::ListMain | Job::ListArchive
+                ) {
                     self.fail("Couldn't finish loading Telegram chats. Retry or continue with the chats found so far.");
-                } else {
-                    self.snapshot.failed_checks += 1;
-                    if matches!(job, Job::Audio { .. } | Job::Document { .. }) {
-                        self.snapshot.checked_bots += 1;
+                } else if let Some(chat_id) = job.chat_id() {
+                    if matches!(job, Job::GetChat { .. })
+                        && !self
+                            .snapshot
+                            .chats
+                            .iter()
+                            .any(|chat| chat.chat_id == chat_id)
+                    {
+                        return true;
                     }
-                    self.snapshot.error = Some(format!(
-                        "{} chats could not be checked. You can retry discovery.",
-                        self.snapshot.failed_checks
-                    ));
-                    self.publish();
+                    if matches!(job, Job::User { .. } | Job::Channel { .. }) {
+                        // Classification may be incomplete, but the media check can still succeed.
+                    } else if code == 400
+                        && value["message"] == "Can't access the chat"
+                        && self
+                            .snapshot
+                            .chats
+                            .iter()
+                            .any(|chat| chat.chat_id == chat_id && !chat.selected)
+                    {
+                        self.mark_inaccessible(chat_id);
+                    } else {
+                        self.mark_failed(
+                            chat_id,
+                            job_name,
+                            code,
+                            value["message"].as_str().unwrap_or(""),
+                        );
+                    }
                 }
             }
             return true;
@@ -433,7 +561,57 @@ impl SourceEngine {
             Job::LoadMain | Job::LoadArchive => {
                 self.jobs.push_front(job);
             }
-            Job::User { chat_id, user_id } => {
+            Job::ListMain | Job::ListArchive => {
+                let Some(ids) = value["chat_ids"].as_array() else {
+                    self.fail("Telegram returned an invalid chat list. Retry discovery.");
+                    return true;
+                };
+                let target = if matches!(job, Job::ListMain) {
+                    &mut self.main_ids
+                } else {
+                    &mut self.archive_ids
+                };
+                target.extend(ids.iter().filter_map(Value::as_i64));
+                if matches!(job, Job::ListMain) {
+                    self.jobs.push_front(Job::ListArchive);
+                } else {
+                    self.finish_lists();
+                }
+            }
+            Job::GetChat { chat_id } => {
+                if value["type"]["@type"] == "chatTypeSecret" {
+                    if self
+                        .snapshot
+                        .chats
+                        .iter()
+                        .any(|chat| chat.chat_id == chat_id)
+                    {
+                        self.mark_failed(
+                            chat_id,
+                            "chat details",
+                            0,
+                            "Secret chats are not supported",
+                        );
+                    }
+                } else if value["id"].as_i64() != Some(chat_id) {
+                    if self
+                        .snapshot
+                        .chats
+                        .iter()
+                        .any(|chat| chat.chat_id == chat_id)
+                    {
+                        self.mark_failed(
+                            chat_id,
+                            "chat details",
+                            0,
+                            "Telegram returned unexpected chat details",
+                        );
+                    }
+                } else {
+                    self.ingest_chat(value);
+                }
+            }
+            Job::User { chat_id, .. } => {
                 let first = value["first_name"].as_str().unwrap_or("");
                 let last = value["last_name"].as_str().unwrap_or("");
                 let display = format!("{first} {last}").trim().to_string();
@@ -449,63 +627,86 @@ impl SourceEngine {
                 };
                 self.set_title(chat_id, &name);
                 if value["type"]["@type"] == "userTypeBot" {
-                    self.snapshot.total_bots += 1;
-                    self.jobs.push_back(Job::Audio {
-                        chat_id,
-                        bot_id: user_id,
-                        before: 0,
-                    });
+                    self.set_kind(chat_id, SourceKind::MusicBot, "Bot conversation");
+                } else {
+                    self.set_kind(chat_id, SourceKind::OtherChat, "Private chat");
                 }
-                self.publish();
             }
             Job::Channel { chat_id, .. } => {
                 if value["is_channel"] == true
                     && value["status"]["@type"] == "chatMemberStatusCreator"
                 {
                     self.set_kind(chat_id, SourceKind::PersonalChannel, "Your channel");
+                } else {
+                    self.set_kind(chat_id, SourceKind::OtherChat, "Channel or group");
                 }
             }
             Job::Audio {
                 chat_id,
-                bot_id,
                 before,
-            } => {
-                self.process_probe(value, chat_id, bot_id, before, false);
-            }
+                epoch,
+            } => self.process_probe(value, chat_id, before, epoch, false),
             Job::Document {
                 chat_id,
-                bot_id,
                 before,
-            } => {
-                self.process_probe(value, chat_id, bot_id, before, true);
-            }
+                epoch,
+            } => self.process_probe(value, chat_id, before, epoch, true),
         }
         true
+    }
+
+    fn update_list_membership(&mut self, chat_id: i64, list: &Value, present: bool) {
+        if !self.lists_ready {
+            return;
+        }
+        let was_listed = self.is_listed(chat_id);
+        let ids = match list["@type"].as_str() {
+            Some("chatListMain") => &mut self.main_ids,
+            Some("chatListArchive") => &mut self.archive_ids,
+            _ => return,
+        };
+        if present {
+            ids.insert(chat_id);
+        } else {
+            ids.remove(&chat_id);
+        }
+        match (was_listed, self.is_listed(chat_id)) {
+            (false, true) => self.include_cached_chat(chat_id),
+            (true, false) => {
+                self.invalidate_probe(chat_id);
+                self.proof_messages.remove(&chat_id);
+                self.jobs.retain(|job| job.chat_id() != Some(chat_id));
+                self.snapshot.chats.retain(|chat| chat.chat_id != chat_id);
+                self.snapshot
+                    .failed_chats
+                    .retain(|failure| failure.chat_id != chat_id);
+                self.refresh_progress();
+                self.publish();
+            }
+            _ => (),
+        }
     }
 
     fn end_chat_list(&mut self, job: Job) {
         match job {
             Job::LoadMain => self.jobs.push_front(Job::LoadArchive),
-            Job::LoadArchive => {
-                self.snapshot.stage = DiscoveryStage::CheckingBots;
-                for chat in self.chats.values() {
-                    if let Some(user_id) = chat.private_user {
-                        self.jobs.push_back(Job::User {
-                            chat_id: chat.chat_id,
-                            user_id,
-                        });
-                    }
-                    if let Some(supergroup_id) = chat.supergroup {
-                        self.jobs.push_back(Job::Channel {
-                            chat_id: chat.chat_id,
-                            supergroup_id,
-                        });
-                    }
-                }
-                self.publish();
-            }
+            Job::LoadArchive => self.jobs.push_front(Job::ListMain),
             _ => (),
         }
+    }
+
+    fn finish_lists(&mut self) {
+        self.lists_ready = true;
+        self.snapshot.stage = DiscoveryStage::CheckingMusic;
+        if let Some(account) = self.snapshot.account_id {
+            self.queue_probe(account);
+        }
+        let ids: BTreeSet<_> = self.main_ids.union(&self.archive_ids).copied().collect();
+        for chat_id in ids {
+            self.include_cached_chat(chat_id);
+        }
+        self.refresh_progress();
+        self.publish();
     }
 
     fn set_kind(&mut self, chat_id: i64, kind: SourceKind, subtitle: &str) {
@@ -551,59 +752,246 @@ impl SourceEngine {
         }
     }
 
+    fn refresh_progress(&mut self) {
+        self.snapshot.total_chats = self.snapshot.chats.len();
+        self.snapshot.checked_chats = self
+            .snapshot
+            .chats
+            .iter()
+            .filter(|chat| {
+                matches!(
+                    chat.music,
+                    MusicCheck::Found | MusicCheck::Empty | MusicCheck::Failed
+                )
+            })
+            .count();
+        self.snapshot.failed_checks = self.snapshot.failed_chats.len();
+        self.snapshot.error = match self.snapshot.failed_checks {
+            0 => None,
+            1 => Some("1 chat could not be checked. You can retry discovery.".into()),
+            count => Some(format!(
+                "{count} chats could not be checked. You can retry discovery."
+            )),
+        };
+    }
+
+    fn queue_probe(&mut self, chat_id: i64) {
+        let epoch = self.scan_epochs.get(&chat_id).copied().unwrap_or(0);
+        self.jobs.push_back(Job::Audio {
+            chat_id,
+            before: 0,
+            epoch,
+        });
+    }
+
+    fn retry_failed(&mut self) {
+        let failed: Vec<_> = self
+            .snapshot
+            .failed_chats
+            .iter()
+            .map(|item| item.chat_id)
+            .collect();
+        self.snapshot.failed_chats.clear();
+        for chat_id in failed {
+            self.invalidate_probe(chat_id);
+            if let Some(chat) = self
+                .snapshot
+                .chats
+                .iter_mut()
+                .find(|chat| chat.chat_id == chat_id)
+            {
+                chat.music = MusicCheck::Unchecked;
+            }
+            if self.snapshot.account_id == Some(chat_id) {
+                self.queue_probe(chat_id);
+            } else if let Some(meta) = self.chats.get(&chat_id) {
+                if let Some(user_id) = meta.private_user {
+                    self.jobs.push_back(Job::User { chat_id, user_id });
+                }
+                if let Some(supergroup_id) = meta.supergroup {
+                    self.jobs.push_back(Job::Channel {
+                        chat_id,
+                        supergroup_id,
+                    });
+                }
+                self.queue_probe(chat_id);
+            } else {
+                self.jobs.push_back(Job::GetChat { chat_id });
+            }
+        }
+        self.snapshot.stage = DiscoveryStage::CheckingMusic;
+        self.snapshot.show_partial = true;
+        self.refresh_progress();
+        self.publish();
+    }
+
+    fn invalidate_probe(&mut self, chat_id: i64) {
+        let epoch = self.scan_epochs.entry(chat_id).or_insert(0);
+        *epoch += 1;
+    }
+
+    fn rescan_chat(&mut self, chat_id: i64) {
+        if !self
+            .snapshot
+            .chats
+            .iter()
+            .any(|chat| chat.chat_id == chat_id)
+        {
+            return;
+        }
+        self.invalidate_probe(chat_id);
+        self.proof_messages.remove(&chat_id);
+        if let Some(chat) = self
+            .snapshot
+            .chats
+            .iter_mut()
+            .find(|chat| chat.chat_id == chat_id)
+        {
+            chat.music = MusicCheck::Unchecked;
+        }
+        self.snapshot
+            .failed_chats
+            .retain(|failure| failure.chat_id != chat_id);
+        self.queue_probe(chat_id);
+        self.snapshot.stage = DiscoveryStage::CheckingMusic;
+        self.snapshot.show_partial = true;
+        self.refresh_progress();
+        self.publish();
+    }
+
+    fn mark_found(&mut self, chat_id: i64, message_id: i64) {
+        if let Some(chat) = self
+            .snapshot
+            .chats
+            .iter_mut()
+            .find(|chat| chat.chat_id == chat_id)
+        {
+            chat.music = MusicCheck::Found;
+            self.proof_messages.insert(chat_id, message_id);
+            self.snapshot
+                .failed_chats
+                .retain(|failure| failure.chat_id != chat_id);
+            self.snapshot.show_partial = true;
+            self.refresh_progress();
+            self.publish();
+        }
+    }
+
+    fn mark_empty(&mut self, chat_id: i64) {
+        let Some(chat) = self
+            .snapshot
+            .chats
+            .iter()
+            .find(|chat| chat.chat_id == chat_id)
+            .cloned()
+        else {
+            return;
+        };
+        if chat.selected {
+            let saved = match (self.snapshot.account_id, &self.store) {
+                (Some(account), Some(store)) => store.set_selected(account, &chat, false).is_ok(),
+                _ => false,
+            };
+            if !saved {
+                self.mark_failed(
+                    chat_id,
+                    "saving source choice",
+                    0,
+                    "Couldn't save the updated choice",
+                );
+                return;
+            }
+        }
+        if let Some(chat) = self
+            .snapshot
+            .chats
+            .iter_mut()
+            .find(|chat| chat.chat_id == chat_id)
+        {
+            chat.selected = false;
+            chat.music = MusicCheck::Empty;
+        }
+        self.proof_messages.remove(&chat_id);
+        self.snapshot
+            .failed_chats
+            .retain(|failure| failure.chat_id != chat_id);
+        self.refresh_progress();
+        self.publish();
+    }
+
+    fn mark_failed(&mut self, chat_id: i64, operation: &str, code: i64, reason: &str) {
+        self.proof_messages.remove(&chat_id);
+        if let Some(chat) = self
+            .snapshot
+            .chats
+            .iter_mut()
+            .find(|chat| chat.chat_id == chat_id)
+        {
+            chat.music = MusicCheck::Failed;
+        }
+        self.snapshot
+            .failed_chats
+            .retain(|failure| failure.chat_id != chat_id);
+        self.snapshot.failed_chats.push(FailedChatCheck {
+            chat_id,
+            operation: operation.into(),
+            code,
+            reason: reason.into(),
+        });
+        self.refresh_progress();
+        self.publish();
+    }
+
+    fn mark_inaccessible(&mut self, chat_id: i64) {
+        self.proof_messages.remove(&chat_id);
+        if let Some(chat) = self
+            .snapshot
+            .chats
+            .iter_mut()
+            .find(|chat| chat.chat_id == chat_id)
+        {
+            chat.music = MusicCheck::Failed;
+        }
+        self.refresh_progress();
+        self.publish();
+    }
+
     fn process_probe(
         &mut self,
         value: &Value,
         chat_id: i64,
-        bot_id: i64,
         before: i64,
+        epoch: u64,
         documents: bool,
     ) {
-        let messages = value["messages"].as_array();
-        let found = messages.is_some_and(|messages| {
-            messages.iter().any(|message| {
-                message["content"]["@type"]
-                    == if documents {
-                        "messageDocument"
-                    } else {
-                        "messageAudio"
+        match super::music_probe_page(value, before) {
+            super::MusicProbePage::Found(message_id) => self.mark_found(chat_id, message_id),
+            super::MusicProbePage::Next(before) => {
+                self.jobs.push_back(if documents {
+                    Job::Document {
+                        chat_id,
+                        before,
+                        epoch,
                     }
-                    && super::bot_music_message(message, bot_id)
-            })
-        });
-        if found {
-            self.set_kind(chat_id, SourceKind::MusicBot, "Music bot");
-            self.snapshot.checked_bots += 1;
-            self.publish();
-            return;
-        }
-        let last = messages
-            .and_then(|items| items.last())
-            .and_then(|item| item["id"].as_i64());
-        if let Some(last) = last.filter(|id| *id > 1 && (before == 0 || *id < before)) {
-            let next = if documents {
-                Job::Document {
+                } else {
+                    Job::Audio {
+                        chat_id,
+                        before,
+                        epoch,
+                    }
+                });
+            }
+            super::MusicProbePage::Exhausted if documents => self.mark_empty(chat_id),
+            super::MusicProbePage::Exhausted => {
+                self.jobs.push_back(Job::Document {
                     chat_id,
-                    bot_id,
-                    before: last - 1,
-                }
-            } else {
-                Job::Audio {
-                    chat_id,
-                    bot_id,
-                    before: last - 1,
-                }
-            };
-            self.jobs.push_back(next);
-        } else if documents {
-            self.snapshot.checked_bots += 1;
-            self.publish();
-        } else {
-            self.jobs.push_back(Job::Document {
-                chat_id,
-                bot_id,
-                before: 0,
-            });
+                    before: 0,
+                    epoch,
+                });
+            }
+            super::MusicProbePage::Invalid(reason) => {
+                self.mark_failed(chat_id, "music history", 0, reason);
+            }
         }
     }
 
@@ -611,16 +999,67 @@ impl SourceEngine {
         if self.logout_account.is_some() || self.snapshot.account_id.is_none() {
             return;
         }
-        if let Some((_, _, started)) = &self.active {
+        if let Some((_, job, started)) = &self.active {
             if started.elapsed() > REQUEST_TIMEOUT {
-                self.fail("Telegram took too long to check chats. Retry or continue with the chats found so far.");
+                let job = job.clone();
+                self.active = None;
+                if let Some(chat_id) = job.chat_id() {
+                    if !matches!(job, Job::GetChat { .. })
+                        || self
+                            .snapshot
+                            .chats
+                            .iter()
+                            .any(|chat| chat.chat_id == chat_id)
+                    {
+                        self.mark_failed(chat_id, "Telegram request", 0, "Request timed out");
+                    }
+                } else {
+                    self.fail("Telegram took too long to load chats. Retry or continue with the chats found so far.");
+                }
             }
             return;
         }
-        let Some(job) = self.jobs.pop_front() else {
-            if self.snapshot.stage == DiscoveryStage::CheckingBots {
+        let job = loop {
+            let Some(job) = self.jobs.pop_front() else {
+                break None;
+            };
+            if let Job::Audio { chat_id, epoch, .. } | Job::Document { chat_id, epoch, .. } = &job {
+                let status = self
+                    .snapshot
+                    .chats
+                    .iter()
+                    .find(|chat| chat.chat_id == *chat_id)
+                    .map(|chat| chat.music);
+                if self.scan_epochs.get(chat_id).copied().unwrap_or(0) != *epoch
+                    || matches!(
+                        status,
+                        None | Some(MusicCheck::Found | MusicCheck::Empty | MusicCheck::Failed)
+                    )
+                {
+                    continue;
+                }
+            }
+            if let Job::GetChat { chat_id } = &job
+                && self.chats.contains_key(chat_id)
+            {
+                continue;
+            }
+            if let Job::User { chat_id, .. } | Job::Channel { chat_id, .. } = &job
+                && self
+                    .snapshot
+                    .chats
+                    .iter()
+                    .any(|chat| chat.chat_id == *chat_id && chat.music == MusicCheck::Failed)
+            {
+                continue;
+            }
+            break Some(job);
+        };
+        let Some(job) = job else {
+            if self.snapshot.stage == DiscoveryStage::CheckingMusic {
                 self.snapshot.stage = DiscoveryStage::Complete;
                 self.initial_complete = true;
+                self.snapshot.show_partial = true;
                 self.publish();
             }
             return;
@@ -632,6 +1071,13 @@ impl SourceEngine {
             Job::LoadArchive => {
                 json!({"@type":"loadChats", "chat_list":{"@type":"chatListArchive"}, "limit":100})
             }
+            Job::ListMain => {
+                json!({"@type":"getChats", "chat_list":{"@type":"chatListMain"}, "limit":100000})
+            }
+            Job::ListArchive => {
+                json!({"@type":"getChats", "chat_list":{"@type":"chatListArchive"}, "limit":100000})
+            }
+            Job::GetChat { chat_id } => json!({"@type":"getChat", "chat_id":chat_id}),
             Job::User { user_id, .. } => json!({"@type":"getUser", "user_id":user_id}),
             Job::Channel { supergroup_id, .. } => {
                 json!({"@type":"getSupergroup", "supergroup_id":supergroup_id})
@@ -658,9 +1104,151 @@ impl SourceEngine {
         let mut request = request;
         request["@extra"] = json!(extra);
         if td.send(&request).is_err() {
-            self.fail("Couldn't request Telegram chats. Check your connection and retry.");
+            if let Some(chat_id) = job.chat_id() {
+                if !matches!(job, Job::GetChat { .. })
+                    || self
+                        .snapshot
+                        .chats
+                        .iter()
+                        .any(|chat| chat.chat_id == chat_id)
+                {
+                    self.mark_failed(chat_id, "Telegram request", 0, "Couldn't send request");
+                }
+            } else {
+                self.fail("Couldn't request Telegram chats. Check your connection and retry.");
+            }
         } else {
+            if let Job::Audio { chat_id, .. } = job
+                && let Some(chat) = self
+                    .snapshot
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.chat_id == chat_id)
+            {
+                chat.music = MusicCheck::Checking;
+            }
             self.active = Some((extra, job, Instant::now()));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn selected_engine(label: &str) -> (SourceEngine, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "tunestash-{label}-{}-{}.sqlite",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("thread")
+        ));
+        let _ = std::fs::remove_file(&path);
+        let (updates, _) = watch::channel(SourceSnapshot::default());
+        let mut engine = SourceEngine::new(path.to_str().unwrap(), updates);
+        engine.snapshot.account_id = Some(7);
+        let chat = SourceChat {
+            chat_id: 42,
+            title: "Music group".into(),
+            subtitle: "Group chat".into(),
+            kind: SourceKind::OtherChat,
+            selected: true,
+            music: MusicCheck::Found,
+        };
+        engine
+            .store
+            .as_ref()
+            .unwrap()
+            .set_selected(7, &chat, true)
+            .unwrap();
+        engine.add_chat(chat);
+        (engine, path)
+    }
+
+    #[test]
+    fn empty_history_disables_persisted_choice() {
+        let (mut engine, path) = selected_engine("empty");
+        engine.mark_empty(42);
+        assert_eq!(engine.snapshot.chats[0].music, MusicCheck::Empty);
+        assert!(!engine.snapshot.chats[0].selected);
+        assert!(!engine.store.as_ref().unwrap().selected(7, 42).unwrap());
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn failed_history_preserves_persisted_choice_but_hides_chat() {
+        let (mut engine, path) = selected_engine("failed");
+        engine.mark_failed(42, "audio history", 500, "Temporary error");
+        assert_eq!(engine.snapshot.chats[0].music, MusicCheck::Failed);
+        assert!(engine.snapshot.selected_chats().next().is_none());
+        assert!(engine.store.as_ref().unwrap().selected(7, 42).unwrap());
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn inaccessible_unselected_chat_does_not_raise_retry_failure() {
+        let (mut engine, path) = selected_engine("inaccessible");
+        engine.snapshot.chats[0].selected = false;
+        engine
+            .store
+            .as_ref()
+            .unwrap()
+            .set_selected(7, &engine.snapshot.chats[0], false)
+            .unwrap();
+        engine.active = Some((
+            99,
+            Job::Audio {
+                chat_id: 42,
+                before: 0,
+                epoch: 0,
+            },
+            Instant::now(),
+        ));
+        assert!(engine.handle_value(
+            &TdJson,
+            &json!({
+                "@extra":99,"@type":"error","code":400,"message":"Can't access the chat"
+            })
+        ));
+        assert_eq!(engine.snapshot.chats[0].music, MusicCheck::Failed);
+        assert_eq!(engine.snapshot.failed_checks, 0);
+        assert!(engine.snapshot.available_chats().next().is_none());
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn only_main_and_archive_ids_become_candidates() {
+        let path =
+            std::env::temp_dir().join(format!("tunestash-lists-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let (updates, _) = watch::channel(SourceSnapshot::default());
+        let mut engine = SourceEngine::new(path.to_str().unwrap(), updates);
+        engine.snapshot.account_id = Some(7);
+        for id in [10, 11, 12] {
+            engine.ingest_chat(&json!({
+                "id":id,"title":format!("Chat {id}"),
+                "type":{"@type":"chatTypeBasicGroup"}
+            }));
+        }
+        engine.main_ids.insert(10);
+        engine.archive_ids.insert(10);
+        engine.archive_ids.insert(11);
+        engine.finish_lists();
+        let ids: BTreeSet<_> = engine
+            .snapshot
+            .chats
+            .iter()
+            .map(|chat| chat.chat_id)
+            .collect();
+        assert_eq!(ids, BTreeSet::from([10, 11]));
+        assert!(!engine.jobs.iter().any(|job| job.chat_id() == Some(12)));
+        engine.update_list_membership(10, &json!({"@type":"chatListMain"}), false);
+        assert!(engine.snapshot.chats.iter().any(|chat| chat.chat_id == 10));
+        engine.update_list_membership(10, &json!({"@type":"chatListArchive"}), false);
+        assert!(!engine.snapshot.chats.iter().any(|chat| chat.chat_id == 10));
+        drop(engine);
+        let _ = std::fs::remove_file(path);
     }
 }
