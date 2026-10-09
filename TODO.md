@@ -1,1 +1,1 @@
-- select chats
+- fix why some sources goes hide and show during scaning

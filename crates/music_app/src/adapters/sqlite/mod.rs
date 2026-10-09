@@ -49,6 +49,12 @@ pub struct SourceStore {
 impl SourceStore {
     pub fn open(path: &Path) -> Result<Self, String> {
         let connection = Connection::open(path).map_err(|error| error.to_string())?;
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if version > 2 {
+            return Err("Source database was created by a newer app version.".into());
+        }
         connection
             .execute_batch(
                 "PRAGMA foreign_keys = ON;
@@ -77,7 +83,10 @@ impl SourceStore {
                    FOREIGN KEY(account_id) REFERENCES source_scan_state(account_id)
                      ON DELETE CASCADE
                  );
-                 PRAGMA user_version = 1;
+                 CREATE TABLE IF NOT EXISTS source_setup_complete (
+                   account_id INTEGER PRIMARY KEY
+                 );
+                 PRAGMA user_version = 2;
                  COMMIT;",
             )
             .map_err(|error| error.to_string())?;
@@ -93,6 +102,28 @@ impl SourceStore {
             )
             .optional()
             .map(|value| value.unwrap_or(false))
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn setup_complete(&self, account_id: i64) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT 1 FROM source_setup_complete WHERE account_id = ?1",
+                [account_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|value| value.is_some())
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn finish_setup(&self, account_id: i64) -> Result<(), String> {
+        self.connection
+            .execute(
+                "INSERT OR IGNORE INTO source_setup_complete(account_id) VALUES (?1)",
+                [account_id],
+            )
+            .map(|_| ())
             .map_err(|error| error.to_string())
     }
 
@@ -250,6 +281,12 @@ impl SourceStore {
             .map_err(|error| error.to_string())?;
         transaction
             .execute(
+                "DELETE FROM source_setup_complete WHERE account_id = ?1",
+                [account_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
                 "DELETE FROM source_scan_state WHERE account_id = ?1",
                 [account_id],
             )
@@ -356,6 +393,50 @@ mod tests {
         reopened.clear_account(10).unwrap();
         assert!(reopened.load_discovery(10).unwrap().is_none());
         assert!(!reopened.selected(10, 99).unwrap());
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn v1_catalog_upgrades_without_losing_sources_and_setup_is_account_scoped() {
+        let path = std::env::temp_dir().join(format!(
+            "tunestash-source-setup-upgrade-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let chat = SourceChat {
+            chat_id: 99,
+            title: "Music bot".into(),
+            subtitle: "Bot conversation".into(),
+            kind: SourceKind::MusicBot,
+            selected: true,
+            music: MusicCheck::Found,
+        };
+        let mut old = SourceStore::open(&path).unwrap();
+        old.set_selected(10, &chat, true).unwrap();
+        old.save_discovery(10, std::slice::from_ref(&chat)).unwrap();
+        drop(old);
+        let old_schema = Connection::open(&path).unwrap();
+        old_schema
+            .execute_batch("DROP TABLE source_setup_complete; PRAGMA user_version = 1;")
+            .unwrap();
+        drop(old_schema);
+
+        let upgraded = SourceStore::open(&path).unwrap();
+        assert_eq!(upgraded.load_discovery(10).unwrap(), Some(vec![chat]));
+        assert!(!upgraded.setup_complete(10).unwrap());
+        upgraded.finish_setup(10).unwrap();
+        upgraded.finish_setup(10).unwrap();
+        assert!(upgraded.setup_complete(10).unwrap());
+        assert!(!upgraded.setup_complete(11).unwrap());
+        upgraded.finish_setup(11).unwrap();
+        drop(upgraded);
+
+        let mut reopened = SourceStore::open(&path).unwrap();
+        assert!(reopened.setup_complete(10).unwrap());
+        reopened.clear_account(10).unwrap();
+        assert!(!reopened.setup_complete(10).unwrap());
+        assert!(reopened.setup_complete(11).unwrap());
         drop(reopened);
         let _ = std::fs::remove_file(path);
     }

@@ -4,10 +4,14 @@ use music_core::domain::{DiscoveryStage, SourceChat, SourceCommand, SourceKind, 
 
 const NOTE: Asset = asset!("/assets/music-note.svg");
 
-fn dispatch(command: SourceCommand, mut error: Signal<Option<String>>) {
+fn dispatch(command: SourceCommand, mut error: Signal<Option<String>>) -> bool {
     error.set(None);
-    if let Err(message) = AuthService::global().and_then(|service| service.submit_source(command)) {
-        error.set(Some(message));
+    match AuthService::global().and_then(|service| service.submit_source(command)) {
+        Ok(()) => true,
+        Err(message) => {
+            error.set(Some(message));
+            false
+        }
     }
 }
 
@@ -21,7 +25,11 @@ fn failed_title(snapshot: &SourceSnapshot, chat_id: i64) -> &str {
 }
 
 #[component]
-pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
+pub fn SourceView(
+    snapshot: SourceSnapshot,
+    onboarding: bool,
+    on_next: EventHandler<()>,
+) -> Element {
     let mut query = use_signal(String::new);
     let mut expanded_defaults = use_signal(|| false);
     let mut visible_chat_count = use_signal(|| 40usize);
@@ -32,6 +40,7 @@ pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
         DiscoveryStage::Waiting | DiscoveryStage::LoadingChats | DiscoveryStage::CheckingMusic
     ) && !snapshot.show_partial;
     let failed_loading = snapshot.stage == DiscoveryStage::Failed && !snapshot.show_partial;
+    let setup_complete = snapshot.setup_complete;
     let all_defaults: Vec<_> = snapshot.default_chats().cloned().collect();
     let default_count = all_defaults.len();
     let defaults: Vec<_> = all_defaults
@@ -110,8 +119,8 @@ pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
                     }
                     if failed_loading {
                         div { class: "source-loading-actions",
-                            button { class: "source-primary-action", r#type: "button", onclick: move |_| dispatch(SourceCommand::RetryDiscovery, error), "Retry search" }
-                            button { class: "source-secondary-action", r#type: "button", onclick: move |_| dispatch(SourceCommand::ContinuePartial, error), "Continue with chats found" }
+                            button { class: "source-primary-action", r#type: "button", onclick: move |_| { dispatch(SourceCommand::RetryDiscovery, error); }, "Retry search" }
+                            button { class: "source-secondary-action", r#type: "button", onclick: move |_| { dispatch(SourceCommand::ContinuePartial, error); }, "Continue with chats found" }
                         }
                     }
                 }
@@ -123,10 +132,21 @@ pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
                         div { class: "sources-brand", img { class: "sources-brand-mark", src: NOTE, alt: "" } span { "Tune" span { "Stash" } } }
                         div { class: "sources-title-row",
                             h1 { "Music Sources" }
-                            button { class: "source-resync", r#type: "button",
-                                disabled: matches!(snapshot.stage, DiscoveryStage::Waiting | DiscoveryStage::LoadingChats | DiscoveryStage::CheckingMusic) || snapshot.signing_out,
-                                onclick: move |_| dispatch(SourceCommand::Resync, error),
-                                "Resync"
+                            div { class: "sources-title-actions",
+                                button { class: "source-header-action source-resync", r#type: "button",
+                                    disabled: matches!(snapshot.stage, DiscoveryStage::Waiting | DiscoveryStage::LoadingChats | DiscoveryStage::CheckingMusic) || snapshot.signing_out,
+                                    onclick: move |_| { dispatch(SourceCommand::Resync, error); },
+                                    "Resync"
+                                }
+                                button { class: "source-header-action source-next", r#type: "button",
+                                    disabled: snapshot.stage != DiscoveryStage::Complete || snapshot.signing_out,
+                                    onclick: move |_| {
+                                        if setup_complete || dispatch(SourceCommand::FinishSetup, error) {
+                                            on_next.call(());
+                                        }
+                                    },
+                                    "Next"
+                                }
                             }
                         }
                         p { "Choose where TuneStash will find music. Resync when you want to check Telegram again." }
@@ -142,7 +162,7 @@ pub fn SourceView(snapshot: SourceSnapshot, onboarding: bool) -> Element {
                         div { class: "discovery-banner", role: "status",
                             span { "{progress}" }
                             if snapshot.stage == DiscoveryStage::Failed || (snapshot.stage == DiscoveryStage::Complete && snapshot.failed_checks > 0) {
-                                button { r#type: "button", onclick: move |_| dispatch(SourceCommand::RetryDiscovery, error), "Retry" }
+                                button { r#type: "button", onclick: move |_| { dispatch(SourceCommand::RetryDiscovery, error); }, "Retry" }
                             }
                         }
                     }
@@ -246,7 +266,7 @@ fn SourceRow(chat: SourceChat, compact: bool) -> Element {
             div { class: "source-row-copy", strong { dir: "auto", "{chat.title}" } span { dir: "auto", "{chat.subtitle}" } }
             button { class: if selected { "source-choice selected" } else { "source-choice" },
                 r#type: "button", aria_label: "{action} {chat.title}", aria_pressed: selected,
-                onclick: move |_| dispatch(SourceCommand::SetSelected { chat_id, selected: !selected }, error),
+                onclick: move |_| { dispatch(SourceCommand::SetSelected { chat_id, selected: !selected }, error); },
                 if compact {
                     svg { view_box: "0 0 24 24", fill: "none",
                         if selected { path { d: "m5 12 4 4L19 6" } }

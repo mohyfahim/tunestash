@@ -32,6 +32,11 @@ Updated: 2026-10-09
   ignored until the user taps Resync. Resync runs a full scan and replaces the
   saved catalog only after success. A failed resync restores the last saved
   list. Existing installations perform one scan to create this new catalog.
+- The Sources heading has compact Resync and Next controls. Next is available
+  after a complete scan, including one with failed chat checks or no selected
+  sources. It saves an account-scoped setup marker and opens a blank Library
+  page. Later launches open Library; Back to Sources opens Sources temporarily.
+  Logout removes the marker, and a failed save keeps Sources visible.
 - A Change account confirmation starts TDLib logout, clears the account's
   source choices after TDLib closes, and creates a fresh TDLib client for the
   next login. It is only exposed during onboarding.
@@ -55,6 +60,13 @@ Updated: 2026-10-09
   background and inline CSS removed the bright frame in a repeat recording.
 - Host source-choice and classification tests pass. Android-target Clippy and
   the final APK build pass with bundled SQLite.
+- Host tests cover the v1-to-v2 setup-marker migration, account isolation,
+  completion with partial failures and no selection, persistence after a fresh
+  authorization, failed writes, and Library/Back routing.
+- The updated APK built and installed on Samsung SM-A256E. On the device, the
+  44px-tall Resync and Next buttons aligned with Music Sources without wrapping.
+  With no sources selected, Next opened the blank Library page; Back returned
+  to Sources, and a cold relaunch opened Library again.
 - Host tests cover audio and Document eligibility, sender independence,
   pagination, section placement, account-scoped persistence, and the different
   persistence outcomes for empty and failed scans. The Android target passes

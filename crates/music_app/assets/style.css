@@ -76,7 +76,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--lime); outl
 @media (max-height: 620px) { .welcome-top { padding-top: 26px; } .welcome-wave { top: 43%; } .privacy-copy { margin-top: 30px; } .welcome-bottom { padding-bottom: 22px; } .auth-content { margin-top: 22px; } }
 
 /* Sources keeps one semantic palette so Settings can later share the screen. */
-.sources-screen, .source-loading-screen {
+.sources-screen, .source-loading-screen, .library-placeholder {
   --source-bg: #171a19;
   --source-surface: #202421;
   --source-surface-raised: #292e2a;
@@ -97,11 +97,17 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--lime); outl
 .sources-brand-mark { display: block; width: 27px; height: 27px; border-radius: 8px; }
 .source-expand { display: block; width: 100%; min-height: 46px; margin-top: 5px; padding: 10px 4px; border: 0; background: none; color: var(--source-violet); font-size: 13px; font-weight: 700; text-align: left; }
 .sources-header h1 { margin: 0 0 10px; font-size: clamp(30px, 8vw, 38px); line-height: 1.1; letter-spacing: -.03em; }
-.sources-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.sources-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
 .sources-title-row h1 { min-width: 0; margin: 0; }
-.source-resync { flex: none; min-height: 44px; padding: 8px 14px; border: 1px solid var(--source-border); border-radius: 12px; background: var(--source-surface-raised); color: var(--source-accent); font-size: 14px; font-weight: 700; }
-.source-resync:disabled { opacity: .5; cursor: default; }
-.source-resync:focus-visible { outline: 2px solid var(--source-accent); outline-offset: 2px; }
+.sources-title-actions { display: flex; flex: none; align-items: center; gap: 6px; }
+.source-header-action { min-height: 44px; padding: 8px 10px; border-radius: 11px; font-size: 12px; font-weight: 750; white-space: nowrap; }
+.source-resync { border: 1px solid var(--source-border); background: var(--source-surface-raised); color: var(--source-accent); }
+.source-next { border: 1px solid var(--source-accent); background: var(--source-accent); color: #171a19; }
+.source-header-action:disabled { opacity: .5; cursor: default; }
+.source-header-action:focus-visible, .library-back:focus-visible { outline: 2px solid var(--source-accent); outline-offset: 2px; }
+.library-placeholder-layout { max-width: 680px; margin: 0 auto; padding: max(30px, env(safe-area-inset-top)) 20px max(44px, env(safe-area-inset-bottom)); }
+.library-back { min-height: 44px; padding: 8px 0; border: 0; background: none; color: var(--source-violet); font-size: 14px; font-weight: 700; }
+.library-placeholder h1 { margin: 32px 0 0; font-size: clamp(30px, 8vw, 38px); line-height: 1.1; letter-spacing: -.03em; }
 .sources-header p { max-width: 42ch; margin: 0; color: var(--source-secondary); font-size: 15px; line-height: 1.5; }
 .connected-account { display: flex; align-items: center; gap: 13px; min-height: 78px; padding: 12px 14px; border-radius: 16px; background: var(--source-surface-raised); }
 .connected-icon { display: grid; place-items: center; flex: none; width: 46px; height: 46px; border-radius: 13px; background: #32a8ee; color: white; }
@@ -176,4 +182,5 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--lime); outl
 .source-dialog-actions button { flex: 1; }
 @keyframes source-progress { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
 @media (max-width: 380px) { .sources-layout { padding-inline: 16px; } .connected-account { gap: 9px; padding-inline: 10px; } .source-row { gap: 10px; padding-inline: 10px; } .source-row-copy span { font-size: 11px; } }
+@media (max-width: 380px) { .sources-title-row h1 { font-size: 26px; } .source-header-action { padding-inline: 8px; font-size: 11px; } }
 @media (prefers-reduced-motion: reduce) { .source-loading-line::before { animation: none; width: 100%; } .choice-thumb, .choice-thumb::after { transition: none; } }

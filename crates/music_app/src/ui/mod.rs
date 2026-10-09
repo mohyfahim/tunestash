@@ -5,7 +5,7 @@ mod sources;
 use crate::runtime::AuthService;
 use dioxus::prelude::*;
 use music_core::{
-    domain::{AuthCommand, AuthSnapshot, AuthStage},
+    domain::{AuthCommand, AuthSnapshot, AuthStage, SourceSnapshot},
     ports::TelegramAuth,
 };
 
@@ -30,6 +30,28 @@ fn send(command: AuthCommand, mut error: Signal<Option<String>>) {
     }
 }
 
+fn show_library(user_id: i64, sources: &SourceSnapshot, temporary_sources: Option<i64>) -> bool {
+    sources.account_id == Some(user_id)
+        && sources.setup_complete
+        && !sources.signing_out
+        && temporary_sources != Some(user_id)
+}
+
+#[component]
+fn LibraryPlaceholder(on_back: EventHandler<()>) -> Element {
+    rsx! {
+        main { class: "library-placeholder",
+            div { class: "library-placeholder-layout",
+                button { class: "library-back", r#type: "button",
+                    onclick: move |_| on_back.call(()),
+                    "Back to Sources"
+                }
+                h1 { "Library" }
+            }
+        }
+    }
+}
+
 #[allow(non_snake_case)]
 pub fn App() -> Element {
     let mut started = use_signal(|| false);
@@ -50,6 +72,7 @@ pub fn App() -> Element {
             .map(|service| service.source_snapshot())
             .unwrap_or_default()
     });
+    let mut temporary_sources = use_signal(|| None::<i64>);
     let mut phone = use_signal(String::new);
     let mut code = use_signal(String::new);
     let mut email = use_signal(String::new);
@@ -76,7 +99,18 @@ pub fn App() -> Element {
         }
     });
 
+    use_effect(move || {
+        if !matches!(&snapshot.read().stage, AuthStage::Ready { .. }) {
+            temporary_sources.set(None);
+        }
+    });
+
     let current = snapshot.read().clone();
+    let source_state = source_snapshot.read().clone();
+    let ready_user = match &current.stage {
+        AuthStage::Ready { user_id } => Some(*user_id),
+        _ => None,
+    };
     let message = local_error.read().clone().or(current.error.clone());
     let step = if *edit_phone.read() {
         Step::Phone
@@ -173,8 +207,16 @@ pub fn App() -> Element {
 
     rsx! {
         document::Style { {include_str!("../../assets/style.css")} }
-        if matches!(current.stage, AuthStage::Ready { .. }) {
-            sources::SourceView { snapshot: source_snapshot.read().clone(), onboarding: true }
+        if let Some(user_id) = ready_user {
+            if show_library(user_id, &source_state, *temporary_sources.read()) {
+                LibraryPlaceholder { on_back: move |_| temporary_sources.set(Some(user_id)) }
+            } else {
+                sources::SourceView {
+                    snapshot: source_state,
+                    onboarding: true,
+                    on_next: move |_| temporary_sources.set(None),
+                }
+            }
         } else if !*started.read()
                 && matches!(current.stage, AuthStage::Connecting)
                 && current.error.is_none()
@@ -259,5 +301,26 @@ pub fn App() -> Element {
                 p { class: "auth-footnote", "This is an independent Telegram session on your device." }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+
+    #[test]
+    fn library_is_default_after_setup_but_sources_can_open_temporarily() {
+        let mut sources = SourceSnapshot {
+            account_id: Some(7),
+            ..Default::default()
+        };
+        assert!(!show_library(7, &sources, None));
+        sources.setup_complete = true;
+        assert!(show_library(7, &sources, None));
+        assert!(!show_library(7, &sources, Some(7)));
+        assert!(show_library(7, &sources, Some(8)));
+        assert!(!show_library(8, &sources, None));
+        sources.signing_out = true;
+        assert!(!show_library(7, &sources, None));
     }
 }

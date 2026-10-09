@@ -114,6 +114,7 @@ pub struct SourceSnapshot {
     pub error: Option<String>,
     pub show_partial: bool,
     pub signing_out: bool,
+    pub setup_complete: bool,
 }
 
 impl Default for SourceSnapshot {
@@ -130,6 +131,7 @@ impl Default for SourceSnapshot {
             error: None,
             show_partial: false,
             signing_out: false,
+            setup_complete: false,
         }
     }
 }
@@ -138,6 +140,7 @@ impl Default for SourceSnapshot {
 pub enum SourceCommand {
     SetSelected { chat_id: i64, selected: bool },
     Resync,
+    FinishSetup,
     RetryDiscovery,
     ContinuePartial,
     LoadMore,

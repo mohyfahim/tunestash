@@ -153,12 +153,19 @@ impl SourceEngine {
             selected: false,
             music: MusicCheck::Unchecked,
         };
-        let cached = match self.store.as_ref() {
-            Some(store) => store.load_discovery(user_id),
+        let (cached, setup_complete) = match self.store.as_ref() {
+            Some(store) => (store.load_discovery(user_id), store.setup_complete(user_id)),
             None => {
                 self.fail(
                     "Source storage is unavailable. Restart the app after freeing device space.",
                 );
+                return;
+            }
+        };
+        self.snapshot.setup_complete = match setup_complete {
+            Ok(complete) => complete,
+            Err(_) => {
+                self.fail("Can't read source setup. Check device storage and retry.");
                 return;
             }
         };
@@ -300,6 +307,30 @@ impl SourceEngine {
                 {
                     self.restart(td);
                 }
+            }
+            SourceCommand::FinishSetup => {
+                let Some(account) = self.snapshot.account_id else {
+                    return;
+                };
+                if self.snapshot.stage != DiscoveryStage::Complete
+                    || self.snapshot.signing_out
+                    || self.snapshot.setup_complete
+                {
+                    return;
+                }
+                let saved = self
+                    .store
+                    .as_ref()
+                    .is_some_and(|store| store.finish_setup(account).is_ok());
+                if saved {
+                    self.snapshot.setup_complete = true;
+                    self.refresh_progress();
+                } else {
+                    self.snapshot.error = Some(
+                        "Couldn't save setup progress. Check device storage and retry.".into(),
+                    );
+                }
+                self.publish();
             }
             SourceCommand::ContinuePartial => {
                 self.snapshot.show_partial = true;
@@ -1386,6 +1417,59 @@ mod tests {
         assert_eq!(
             engine.snapshot.error.as_deref(),
             Some("Telegram is unavailable.")
+        );
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn finish_setup_accepts_complete_scan_with_gaps_and_no_selection() {
+        let (mut engine, path) = selected_engine("finish-setup");
+        engine.snapshot.chats[0].selected = false;
+        engine.snapshot.stage = DiscoveryStage::CheckingMusic;
+        engine.handle_command(&TdJson, SourceCommand::FinishSetup);
+        assert!(!engine.snapshot.setup_complete);
+
+        engine.snapshot.stage = DiscoveryStage::Complete;
+        engine.snapshot.failed_chats.push(FailedChatCheck {
+            chat_id: 99,
+            operation: "Checking music".into(),
+            code: 500,
+            reason: "Telegram timed out".into(),
+        });
+        engine.refresh_progress();
+        assert_eq!(engine.snapshot.failed_checks, 1);
+        engine.handle_command(&TdJson, SourceCommand::FinishSetup);
+        assert!(engine.snapshot.setup_complete);
+        assert_eq!(engine.snapshot.failed_checks, 1);
+        assert!(engine.store.as_ref().unwrap().setup_complete(7).unwrap());
+        drop(engine);
+
+        let (updates, _) = watch::channel(SourceSnapshot::default());
+        let mut restored = SourceEngine::new(path.to_str().unwrap(), updates);
+        restored.authorized(&TdJson, 7, &json!({"first_name":"Test"}));
+        assert!(restored.snapshot.setup_complete);
+        drop(restored);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn failed_setup_write_keeps_sources_open_and_reports_error() {
+        let (mut engine, path) = selected_engine("finish-setup-error");
+        engine.snapshot.stage = DiscoveryStage::Complete;
+        engine.store = None;
+
+        engine.handle_command(&TdJson, SourceCommand::FinishSetup);
+
+        assert_eq!(engine.snapshot.stage, DiscoveryStage::Complete);
+        assert!(!engine.snapshot.setup_complete);
+        assert!(
+            engine
+                .snapshot
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("save setup")
         );
         drop(engine);
         let _ = std::fs::remove_file(path);
