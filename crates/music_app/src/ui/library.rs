@@ -1,6 +1,7 @@
 use crate::runtime::AuthService;
+use crate::ui::home::HomeView;
 use dioxus::prelude::*;
-use music_core::domain::{LibraryCommand, LibrarySnapshot, TrackSummary};
+use music_core::domain::{LibraryCommand, LibrarySnapshot, LibrarySort, TrackSummary};
 
 const NOTE: Asset = asset!("/assets/music-note.svg");
 
@@ -47,9 +48,10 @@ fn TrackRow(track: TrackSummary) -> Element {
 }
 
 #[component]
-pub fn LibraryView(snapshot: LibrarySnapshot) -> Element {
-    let mut tab = use_signal(|| Tab::Library);
+pub fn LibraryView(snapshot: LibrarySnapshot, on_open_sources: EventHandler<()>) -> Element {
+    let mut tab = use_signal(|| Tab::Home);
     let is_library = *tab.read() == Tab::Library;
+    let current_sort = snapshot.sort;
     rsx! {
         div { class: "music-shell",
             if is_library {
@@ -82,6 +84,7 @@ pub fn LibraryView(snapshot: LibrarySnapshot) -> Element {
                     div { class: "library-toolbar",
                         span { class: "library-count",
                             if snapshot.total_count == 1 { "1 track" } else { "{snapshot.total_count} tracks" }
+                            if current_sort == LibrarySort::Recent { " · Recent first" }
                         }
                         div { class: "library-tools",
                             button { r#type: "button", disabled: true, class: "library-tool downloaded",
@@ -91,7 +94,17 @@ pub fn LibraryView(snapshot: LibrarySnapshot) -> Element {
                             button { r#type: "button", disabled: true, class: "library-tool icon-only", aria_label: "Audio filter unavailable",
                                 svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round", path { d: "M5 12V8a7 7 0 0 1 14 0v4M5 12h2v7H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2Zm14 0h-2v7h2a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2Z" } }
                             }
-                            button { r#type: "button", disabled: true, class: "library-tool icon-only", aria_label: "Sort unavailable",
+                            button {
+                                r#type: "button",
+                                class: if current_sort == LibrarySort::Recent { "library-tool icon-only sort-active" } else { "library-tool icon-only" },
+                                aria_label: if current_sort == LibrarySort::Recent { "Sort tracks by title" } else { "Sort tracks by most recent" },
+                                title: if current_sort == LibrarySort::Recent { "Sort by title" } else { "Sort by recent" },
+                                onclick: move |_| {
+                                    if let Ok(service) = AuthService::global() {
+                                        let next = if current_sort == LibrarySort::Recent { LibrarySort::Title } else { LibrarySort::Recent };
+                                        let _ = service.submit_library(LibraryCommand::SetSort(next));
+                                    }
+                                },
                                 svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", path { d: "M4 7h16M7 12h10M10 17h4" } }
                             }
                         }
@@ -123,15 +136,17 @@ pub fn LibraryView(snapshot: LibrarySnapshot) -> Element {
                                         }
                                     }
                                 }
-                                div { class: "library-alphabet", aria_label: "Filter tracks by first letter",
-                                    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ".chars() {
-                                        button {
-                                            class: if snapshot.active_initial == Some(letter) { "library-letter active" } else { "library-letter" },
-                                            r#type: "button",
-                                            aria_label: if snapshot.active_initial == Some(letter) { format!("Clear {letter} filter") } else { format!("Show tracks starting with {letter}") },
-                                            aria_pressed: snapshot.active_initial == Some(letter),
-                                            onclick: move |_| { if let Ok(service) = AuthService::global() { let _ = service.submit_library(LibraryCommand::SelectInitial(letter)); } },
-                                            "{letter}"
+                                if snapshot.sort == LibrarySort::Title {
+                                    div { class: "library-alphabet", aria_label: "Filter tracks by first letter",
+                                        for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ".chars() {
+                                            button {
+                                                class: if snapshot.active_initial == Some(letter) { "library-letter active" } else { "library-letter" },
+                                                r#type: "button",
+                                                aria_label: if snapshot.active_initial == Some(letter) { format!("Clear {letter} filter") } else { format!("Show tracks starting with {letter}") },
+                                                aria_pressed: snapshot.active_initial == Some(letter),
+                                                onclick: move |_| { if let Ok(service) = AuthService::global() { let _ = service.submit_library(LibraryCommand::SelectInitial(letter)); } },
+                                                "{letter}"
+                                            }
                                         }
                                     }
                                 }
@@ -145,8 +160,19 @@ pub fn LibraryView(snapshot: LibrarySnapshot) -> Element {
                         }
                     }
                 }
+            } else if *tab.read() == Tab::Home {
+                HomeView {
+                    snapshot: snapshot.clone(),
+                    on_open_sources: move |_| on_open_sources.call(()),
+                    on_see_all: move |_| {
+                        if let Ok(service) = AuthService::global() {
+                            let _ = service.submit_library(LibraryCommand::SetSort(LibrarySort::Recent));
+                        }
+                        tab.set(Tab::Library);
+                    },
+                }
             } else {
-                main { class: "music-black-page", aria_label: if *tab.read() == Tab::Home { "Home placeholder" } else { "Search placeholder" } }
+                main { class: "music-black-page", aria_label: "Search placeholder" }
             }
             nav { class: "music-bottom-nav", aria_label: "Main navigation",
                 button { class: if *tab.read() == Tab::Home { "nav-tab active" } else { "nav-tab" }, r#type: "button", onclick: move |_| tab.set(Tab::Home),
@@ -157,7 +183,12 @@ pub fn LibraryView(snapshot: LibrarySnapshot) -> Element {
                     svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", circle { cx: "10.5", cy: "10.5", r: "7.5" } path { d: "m16 16 5 5" } }
                     span { "Search" }
                 }
-                button { class: if is_library { "nav-tab active" } else { "nav-tab" }, r#type: "button", onclick: move |_| tab.set(Tab::Library),
+                button { class: if is_library { "nav-tab active" } else { "nav-tab" }, r#type: "button", onclick: move |_| {
+                    if let Ok(service) = AuthService::global() {
+                        let _ = service.submit_library(LibraryCommand::SetSort(LibrarySort::Title));
+                    }
+                    tab.set(Tab::Library);
+                },
                     svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round", path { d: "M4 4h16v16H4zM4 9h16M8 13h8M8 17h5" } }
                     span { "Library" }
                 }

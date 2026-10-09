@@ -166,18 +166,28 @@ pub struct TrackSummary {
 pub struct LibrarySnapshot {
     pub account_id: Option<i64>,
     pub tracks: Vec<TrackSummary>,
+    pub recent_tracks: Vec<TrackSummary>,
     pub total_count: usize,
     pub active_initial: Option<char>,
+    pub sort: LibrarySort,
     pub selected_sources: usize,
     pub indexing_sources: usize,
     pub has_more: bool,
     pub error: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LibrarySort {
+    #[default]
+    Title,
+    Recent,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LibraryCommand {
     LoadMore,
     SelectInitial(char),
+    SetSort(LibrarySort),
     Reindex,
     Retry,
 }

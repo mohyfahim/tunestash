@@ -2,7 +2,7 @@
 
 use super::{TdJson, playable_music_message};
 use crate::adapters::sqlite::library::{LibraryStore, MediaFilter, TrackInput};
-use music_core::domain::{LibraryCommand, LibrarySnapshot, SourceSnapshot};
+use music_core::domain::{LibraryCommand, LibrarySnapshot, LibrarySort, SourceSnapshot};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -12,6 +12,7 @@ use std::{
 use tokio::sync::watch;
 
 const PAGE_SIZE: i64 = 50;
+const HOME_RECENT_LIMIT: usize = 12;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
 
 #[derive(Clone, Debug)]
@@ -93,6 +94,7 @@ pub struct LibraryEngine {
     active: BTreeMap<i64, (Job, Instant)>,
     loaded: usize,
     active_initial: Option<char>,
+    sort: LibrarySort,
     error: Option<String>,
     pause_until: Option<Instant>,
 }
@@ -113,6 +115,7 @@ impl LibraryEngine {
             active: BTreeMap::new(),
             loaded: 50,
             active_initial: None,
+            sort: LibrarySort::Title,
             error,
             pause_until: None,
         }
@@ -122,12 +125,17 @@ impl LibraryEngine {
         let mut snapshot = LibrarySnapshot {
             account_id: self.account,
             active_initial: self.active_initial,
+            sort: self.sort,
             selected_sources: self.selected.len(),
             error: self.error.clone(),
             ..Default::default()
         };
         if let (Some(store), Some(account)) = (&self.store, self.account) {
-            match store.page(account, self.loaded, self.active_initial) {
+            let page = match self.sort {
+                LibrarySort::Title => store.page(account, self.loaded, self.active_initial),
+                LibrarySort::Recent => store.recent_page(account, self.loaded),
+            };
+            match page {
                 Ok((tracks, count)) => {
                     snapshot.total_count = count;
                     snapshot.has_more = count > tracks.len();
@@ -137,6 +145,13 @@ impl LibraryEngine {
                     snapshot.error = Some(
                         "Can't read the music library. Check device storage and restart.".into(),
                     )
+                }
+            }
+            match store.recent_page(account, HOME_RECENT_LIMIT) {
+                Ok((tracks, _)) => snapshot.recent_tracks = tracks,
+                Err(_) => {
+                    snapshot.error =
+                        Some("Can't read recent tracks. Check device storage and restart.".into())
                 }
             }
         }
@@ -161,6 +176,7 @@ impl LibraryEngine {
         self.pause_until = None;
         self.loaded = 50;
         self.active_initial = None;
+        self.sort = LibrarySort::Title;
         if self.store.is_some() {
             self.error = None;
         }
@@ -230,6 +246,12 @@ impl LibraryEngine {
                 } else {
                     Some(letter)
                 };
+                self.loaded = 50;
+                self.publish();
+            }
+            LibraryCommand::SetSort(sort) => {
+                self.sort = sort;
+                self.active_initial = None;
                 self.loaded = 50;
                 self.publish();
             }
@@ -694,6 +716,22 @@ mod tests {
         }
         assert_eq!(receiver.borrow().active_initial, Some('A'));
         assert_eq!(receiver.borrow().total_count, 2);
+        assert_eq!(receiver.borrow().tracks[0].title, "Amber");
+        assert_eq!(
+            receiver
+                .borrow()
+                .recent_tracks
+                .iter()
+                .map(|track| track.message_id)
+                .collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
+        engine.command(LibraryCommand::SetSort(LibrarySort::Recent));
+        assert_eq!(receiver.borrow().sort, LibrarySort::Recent);
+        assert_eq!(receiver.borrow().active_initial, None);
+        assert_eq!(receiver.borrow().tracks[0].message_id, 3);
+        engine.command(LibraryCommand::SetSort(LibrarySort::Title));
+        assert_eq!(receiver.borrow().sort, LibrarySort::Title);
         assert_eq!(receiver.borrow().tracks[0].title, "Amber");
         engine.command(LibraryCommand::SelectInitial('Z'));
         assert_eq!(receiver.borrow().active_initial, Some('Z'));

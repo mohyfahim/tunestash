@@ -1,7 +1,7 @@
 //! Metadata catalog and resumable source scans. All calls run on the TDLib
 //! service thread, never during a Dioxus render.
 
-use music_core::domain::TrackSummary;
+use music_core::domain::{LibrarySort, TrackSummary};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
@@ -238,6 +238,24 @@ impl LibraryStore {
         limit: usize,
         initial: Option<char>,
     ) -> Result<(Vec<TrackSummary>, usize), String> {
+        self.query_page(account, limit, initial, LibrarySort::Title)
+    }
+
+    pub fn recent_page(
+        &self,
+        account: i64,
+        limit: usize,
+    ) -> Result<(Vec<TrackSummary>, usize), String> {
+        self.query_page(account, limit, None, LibrarySort::Recent)
+    }
+
+    fn query_page(
+        &self,
+        account: i64,
+        limit: usize,
+        initial: Option<char>,
+        sort: LibrarySort,
+    ) -> Result<(Vec<TrackSummary>, usize), String> {
         let initial = initial.map(|letter| letter.to_string());
         let total: i64 = self
             .connection
@@ -250,9 +268,17 @@ impl LibraryStore {
                 |row| row.get(0),
             )
             .map_err(|e| e.to_string())?;
+        let order = match sort {
+            LibrarySort::Title => {
+                "tracks.title COLLATE NOCASE ASC, tracks.chat_id ASC, tracks.message_id ASC"
+            }
+            LibrarySort::Recent => {
+                "tracks.message_date DESC, tracks.chat_id DESC, tracks.message_id DESC"
+            }
+        };
         let mut statement = self
             .connection
-            .prepare(
+            .prepare(&format!(
                 "SELECT tracks.chat_id, tracks.message_id, tracks.title, tracks.artist,
               tracks.filename, choices.display_name, tracks.message_date,
               tracks.duration_seconds, tracks.cover_data
@@ -260,9 +286,8 @@ impl LibraryStore {
               ON choices.account_id = tracks.account_id AND choices.chat_id = tracks.chat_id
              WHERE tracks.account_id = ?1 AND choices.enabled = 1
                AND (?2 IS NULL OR substr(tracks.title, 1, 1) COLLATE NOCASE = ?2)
-             ORDER BY tracks.title COLLATE NOCASE ASC, tracks.chat_id ASC, tracks.message_id ASC
-             LIMIT ?3",
-            )
+             ORDER BY {order} LIMIT ?3"
+            ))
             .map_err(|e| e.to_string())?;
         let tracks = statement
             .query_map(params![account, initial, limit as i64], |row| {
@@ -443,6 +468,72 @@ mod tests {
         assert_eq!(a_page[1].message_id, 5);
         assert_eq!(store.page(1, 50, Some('Z')).unwrap().1, 0);
         assert_eq!(store.page(1, 50, Some('2')).unwrap().1, 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn recent_tracks_follow_message_dates_and_enabled_sources_during_import() {
+        let (path, mut store) = fixture();
+        let source = SourceStore::open(&path).unwrap();
+        let second_chat = SourceChat {
+            chat_id: 20,
+            title: "Channel".into(),
+            subtitle: String::new(),
+            kind: SourceKind::PersonalChannel,
+            selected: true,
+            music: MusicCheck::Found,
+        };
+        source.set_selected(1, &second_chat, true).unwrap();
+        source.set_selected(2, &second_chat, true).unwrap();
+        store.start_source(1, 10, false).unwrap();
+        store.start_source(1, 20, false).unwrap();
+        store.start_source(2, 20, false).unwrap();
+
+        let mut older = track(1);
+        older.date = 100;
+        let mut tied = track(2);
+        tied.date = 200;
+        store
+            .save_page(1, 10, MediaFilter::Audio, 90, &[older, tied])
+            .unwrap();
+        let mut newer_chat = track(3);
+        newer_chat.date = 200;
+        let mut newest = track(4);
+        newest.date = 300;
+        store
+            .save_page(1, 20, MediaFilter::Audio, 80, &[newer_chat, newest])
+            .unwrap();
+        store
+            .save_page(2, 20, MediaFilter::Audio, 0, &[track(99)])
+            .unwrap();
+
+        let (recent, count) = store.recent_page(1, 3).unwrap();
+        assert_eq!(count, 4);
+        assert_eq!(
+            recent
+                .iter()
+                .map(|item| (item.chat_id, item.message_id))
+                .collect::<Vec<_>>(),
+            vec![(20, 4), (20, 3), (10, 2)]
+        );
+        assert_eq!(store.recent_page(2, 12).unwrap().1, 1);
+
+        let mut arriving = track(5);
+        arriving.date = 400;
+        store
+            .save_page(1, 10, MediaFilter::Audio, 70, &[arriving])
+            .unwrap();
+        assert_eq!(store.recent_page(1, 1).unwrap().0[0].message_id, 5);
+
+        let disabled_chat = SourceChat {
+            selected: false,
+            ..second_chat
+        };
+        source.set_selected(1, &disabled_chat, false).unwrap();
+        let (recent, count) = store.recent_page(1, 12).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(recent[0].message_id, 5);
+        assert!(recent.iter().all(|item| item.chat_id == 10));
         std::fs::remove_file(path).unwrap();
     }
 }

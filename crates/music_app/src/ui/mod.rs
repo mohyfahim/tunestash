@@ -1,5 +1,6 @@
 //! Welcome, Telegram authentication, and music source selection.
 
+mod home;
 mod library;
 mod sources;
 
@@ -31,7 +32,11 @@ fn send(command: AuthCommand, mut error: Signal<Option<String>>) {
     }
 }
 
-fn show_library(user_id: i64, sources: &SourceSnapshot, temporary_sources: Option<i64>) -> bool {
+fn show_music_shell(
+    user_id: i64,
+    sources: &SourceSnapshot,
+    temporary_sources: Option<i64>,
+) -> bool {
     sources.account_id == Some(user_id)
         && sources.setup_complete
         && !sources.signing_out
@@ -209,8 +214,11 @@ pub fn App() -> Element {
     rsx! {
         document::Style { {include_str!("../../assets/style.css")} }
         if let Some(user_id) = ready_user {
-            if show_library(user_id, &source_state, *temporary_sources.read()) {
-                library::LibraryView { snapshot: library_snapshot.read().clone() }
+            if show_music_shell(user_id, &source_state, *temporary_sources.read()) {
+                library::LibraryView {
+                    snapshot: library_snapshot.read().clone(),
+                    on_open_sources: move |_| temporary_sources.set(Some(user_id)),
+                }
             } else {
                 sources::SourceView {
                     snapshot: source_state,
@@ -310,18 +318,18 @@ mod navigation_tests {
     use super::*;
 
     #[test]
-    fn library_is_default_after_setup_but_sources_can_open_temporarily() {
+    fn music_shell_is_default_after_setup_but_sources_can_open_temporarily() {
         let mut sources = SourceSnapshot {
             account_id: Some(7),
             ..Default::default()
         };
-        assert!(!show_library(7, &sources, None));
+        assert!(!show_music_shell(7, &sources, None));
         sources.setup_complete = true;
-        assert!(show_library(7, &sources, None));
-        assert!(!show_library(7, &sources, Some(7)));
-        assert!(show_library(7, &sources, Some(8)));
-        assert!(!show_library(8, &sources, None));
+        assert!(show_music_shell(7, &sources, None));
+        assert!(!show_music_shell(7, &sources, Some(7)));
+        assert!(show_music_shell(7, &sources, Some(8)));
+        assert!(!show_music_shell(8, &sources, None));
         sources.signing_out = true;
-        assert!(!show_library(7, &sources, None));
+        assert!(!show_music_shell(7, &sources, None));
     }
 }

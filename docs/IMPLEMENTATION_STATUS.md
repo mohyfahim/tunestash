@@ -34,8 +34,8 @@ Updated: 2026-10-09
   list. Existing installations perform one scan to create this new catalog.
 - The Sources heading has compact Resync and Next controls. Next is available
   after a complete scan, including one with failed chat checks or no selected
-  sources. It saves an account-scoped setup marker and opens a blank Library
-  page. Later launches open Library; Back to Sources opens Sources temporarily.
+  sources. It saves an account-scoped setup marker and opens the music shell on
+  Home. Later launches open Home; its gear opens Sources temporarily.
   Logout removes the marker, and a failed save keeps Sources visible.
 - A Change account confirmation starts TDLib logout, clears the account's
   source choices after TDLib closes, and creates a fresh TDLib client for the
@@ -117,8 +117,8 @@ Updated: 2026-10-09
 ## Library increment
 
 - The Library now uses the dark login and Music Sources palette with the mobile
-  layout from `concept/library.png`. Home and Search are black placeholders
-  with persistent dark bottom navigation and dark Android system bars.
+  layout from `concept/library.png`. Search remains a black placeholder with
+  persistent dark bottom navigation and dark Android system bars.
   Category, download, and sorting controls are displayed without active
   behavior. The mini-player stays hidden until playback exists. The icon-only
   Reindex action sits in the Library title row and is disabled without selected
@@ -149,8 +149,36 @@ tapping an active letter restored the full list. The rail stayed visible while
 scrolling, and its lower letters were reachable by scrolling the rail. A cold
 relaunch restored the 383-track catalog. A live Reindex was not exercised.
 No private account database was inspected.
-Playback, streaming, offline downloads, and the Settings entry point remain
+Playback, streaming, offline downloads, and a dedicated Settings screen remain
 future work.
+
+## Home increment
+
+- Home is the default tab after source setup. Its dark layout follows
+  `concept/home.png`: recent cover carousel, listening and playlist sections,
+  and the three-tab bottom navigation. The gear opens the existing Music
+  Sources list; Next returns to Home.
+- Recently Added shows up to 12 real tracks from enabled sources, ordered by
+  Telegram message date with stable chat/message tie breaks. It uses TDLib's
+  embedded cover minithumbnail when available and the TuneStash mark otherwise.
+  See all opens Library in recent order; tapping the Library tab restores title
+  order. Sorting and source filtering remain on the service thread.
+- Listening history and playlists have truthful empty states. Their actions
+  and the mini-player stay hidden until those capabilities exist. No sample
+  tracks or playback success states are shown.
+
+Host tests cover recent ordering and stable ties, account and enabled-source
+filtering, arrival of tracks during indexing, and title/recent sort switching.
+Mobile-feature tests and Clippy pass; the Android ARM64 Rust check and debug APK
+build pass. The APK installed and launched on Samsung SM-A256E (Android 14).
+On that phone, Home displayed recent tracks from the saved Telegram session,
+including mixed Persian/English titles and artwork fallbacks. The gear opened
+Sources, Next returned to Home, See all opened 383 tracks in recent order, the
+Library tab restored title order, and a cold launch returned to Home. Captures
+at the device's normal width and a temporary 960px physical width showed no
+clipping; the phone's original display size was restored. None of the twelve
+recent tracks had an embedded cover, so the Home cover-image path was not
+visually checked on this device.
 
 ## Rust learning note
 

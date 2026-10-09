@@ -138,9 +138,8 @@ theme-dark:
 
 ### Light theme
 
-Use light theme for browsing-heavy screens:
+The light palette remains available for future browsing variants:
 
-- Home
 - Search
 - Library
 - Sources
@@ -151,8 +150,11 @@ The light theme should feel editorial and spacious. Use `warm-ivory` for the pag
 
 ### Dark theme
 
-Use dark theme for immersive playback-focused surfaces:
+Use dark theme for the current Home, Library, and Sources screens and for immersive playback-focused surfaces:
 
+- Home
+- Library
+- Sources
 - Main player / Now Playing
 - Car mode
 - Full-screen queue
@@ -815,10 +817,10 @@ Pair color with icons or labels.
 | Screen | Default Theme | Primary Accent |
 |---|---|---|
 | Login | Light or Dark | Lime + Violet |
-| Home | Light | Lime |
+| Home | Dark | Lime |
 | Search | Light | Lime |
-| Library | Light | Lime |
-| Sources | Light | Violet secondary |
+| Library | Dark | Lime |
+| Sources | Dark | Violet secondary |
 | Mini Player | Dark surface | Lime |
 | Main Player | Dark | Lime |
 | Queue | Dark | Lime |
