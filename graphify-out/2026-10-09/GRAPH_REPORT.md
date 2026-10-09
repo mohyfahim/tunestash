@@ -1,25 +1,25 @@
-# Graph Report - tunestash  (2026-10-02)
+# Graph Report - tunestash  (2026-10-09)
 
 ## Corpus Check
-- 101 files · ~197,756 words
+- 110 files · ~217,844 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 529 nodes · 721 edges · 72 communities (35 shown, 16 thin omitted)
-- Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 5 edges (avg confidence: 0.85)
+- 771 nodes · 1296 edges · 81 communities (48 shown, 18 thin omitted)
+- Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS · INFERRED: 6 edges (avg confidence: 0.85)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `d398d07a`
+- Built from commit: `9b6262fb`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
-- [slug].tsx
+- AuthService
 - FontPanel.tsx
 - website/package.json
 - Software Design Document — Rust-First Telegram Music Player
-- constants.ts
+- i18n.ts
 - HELP-fa.md
 - dependencies
 - DonationView.tsx
@@ -66,55 +66,70 @@
 - webcss.py
 - next-env.d.ts
 - music_app
+- Layout.tsx
+- theme.ts
+- telegram/mod.rs
+- SourceSnapshot
+- ui/mod.rs
+- SourceEngine
+- [slug].tsx
+- MainActivity
+- [lang]/index.tsx
+- build-android.sh
+- Link.tsx
+- Implementation status
+- Android setup
+- install-android.sh
+- build-tdlib-android.sh
 
 ## God Nodes (most connected - your core abstractions)
-1. `Music App Design System` - 28 edges
-2. `react` - 16 edges
-3. `compilerOptions` - 16 edges
-4. `Software Design Document — Rust-First Telegram Music Player` - 14 edges
-5. `react-i18next` - 13 edges
-6. `getLanguages()` - 13 edges
-7. `Product Brief — Personal Telegram Music Player` - 11 edges
-8. `Vazirmatn Changelog` - 10 edges
-9. `make-fonts.sh script` - 8 edges
-10. `error()` - 8 edges
+1. `SourceEngine` - 52 edges
+2. `Music App Design System` - 28 edges
+3. `selected_engine()` - 22 edges
+4. `SourceSnapshot` - 21 edges
+5. `TdJson` - 16 edges
+6. `react` - 16 edges
+7. `compilerOptions` - 16 edges
+8. `Driver` - 15 edges
+9. `AuthService` - 15 edges
+10. `SourceChat` - 14 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `DonationList()` --calls--> `getLanguageDirection()`  [EXTRACTED]
-  fonts/vazirmatn/website/src/components/DonationList.tsx → fonts/vazirmatn/website/src/i18n.ts
-- `getLangFromPath()` --calls--> `getLanguages()`  [EXTRACTED]
-  fonts/vazirmatn/website/src/pages/_app.tsx → fonts/vazirmatn/website/src/i18n.ts
-- `App()` --calls--> `getDefaultLang()`  [EXTRACTED]
-  fonts/vazirmatn/website/src/pages/_app.tsx → fonts/vazirmatn/website/src/i18n.ts
-- `Index()` --calls--> `getDefaultLang()`  [EXTRACTED]
-  fonts/vazirmatn/website/src/pages/index.tsx → fonts/vazirmatn/website/src/i18n.ts
 - `Doc()` --calls--> `getDefaultLang()`  [EXTRACTED]
   fonts/vazirmatn/website/src/pages/[lang]/docs/[slug].tsx → fonts/vazirmatn/website/src/i18n.ts
+- `kind_name()` --references--> `SourceKind`  [EXTRACTED]
+  crates/music_app/src/adapters/sqlite/mod.rs → crates/music_core/src/domain/mod.rs
+- `SourceEngine` --references--> `SourceStore`  [EXTRACTED]
+  crates/music_app/src/adapters/telegram/sources.rs → crates/music_app/src/adapters/sqlite/mod.rs
+- `command_request()` --references--> `AuthStage`  [EXTRACTED]
+  crates/music_app/src/adapters/telegram/mod.rs → crates/music_core/src/domain/mod.rs
+- `Driver` --references--> `SourceEngine`  [EXTRACTED]
+  crates/music_app/src/adapters/telegram/mod.rs → crates/music_app/src/adapters/telegram/sources.rs
 
 ## Import Cycles
 - None detected.
 
-## Communities (72 total, 16 thin omitted)
+## Communities (81 total, 18 thin omitted)
 
-### Community 0 - "[slug].tsx"
-Cohesion: 0.07
-Nodes (46): Footer(), Header(), HeroTitle(), LanguageMenu(), Layout(), LayoutProps, Meta(), ScrollTop() (+38 more)
+### Community 0 - "AuthService"
+Cohesion: 0.11
+Nodes (18): android_storage(), AndroidStorage, Result, String, Vec, AuthService, DriverCommand, Receiver (+10 more)
 
 ### Community 1 - "FontPanel.tsx"
-Cohesion: 0.10
-Nodes (32): fileTypes, FontPanel(), generateId(), Font, fonts, GlyphPanel(), GlyphCollection, glyphCollections (+24 more)
+Cohesion: 0.09
+Nodes (32): SelectButton, fileTypes, FontPanel(), generateId(), Font, fonts, GlyphPanel(), GlyphCollection (+24 more)
 
 ### Community 2 - "website/package.json"
 Cohesion: 0.05
-Nodes (36): devDependencies, eslint, eslint-config-next, @types/node, @types/react, @types/react-window, typescript, name (+28 more)
+Nodes (41): devDependencies, eslint, eslint-config-next, @types/node, @types/react, @types/react-window, typescript, name (+33 more)
 
 ### Community 3 - "Software Design Document — Rust-First Telegram Music Player"
 Cohesion: 0.06
 Nodes (32): 10. Success and learning evidence, 1. Product intent, 2. Goals and constraints, 3. Target user and jobs to be done, 4. Sources and content rules, 5. Main experience, 6. Product requirements, 7. Important behavior decisions (+24 more)
 
-### Community 4 - "constants.ts"
-Cohesion: 0.10
-Nodes (23): getLanguageDirection(), BASE_PATH, DOWNLOAD_BASE_URL, DOWNLOAD_URL, TAG_NAME, VAZIRMATN_CDN_URL, VAZIRMATN_CSS_URL, VAZIRMATN_RD_CSS_URL (+15 more)
+### Community 4 - "i18n.ts"
+Cohesion: 0.13
+Nodes (19): getDefaultLang(), getLanguageDirection(), Resource, resources, BASE_PATH, VAZIRMATN_CSS_URL, VAZIRMATN_RD_CSS_URL, App() (+11 more)
 
 ### Community 5 - "HELP-fa.md"
 Cohesion: 0.08
@@ -125,8 +140,8 @@ Cohesion: 0.08
 Nodes (24): dependencies, date-fns, @emotion/cache, @emotion/react, @emotion/server, @emotion/styled, gray-matter, i18next (+16 more)
 
 ### Community 7 - "DonationView.tsx"
-Cohesion: 0.21
-Nodes (11): DonationList(), Props, DonationView(), SelectButton, convertNumberToPersian(), formatNumber(), Size, useWindowSize() (+3 more)
+Cohesion: 0.30
+Nodes (8): DonationList(), Props, DonationView(), convertNumberToPersian(), formatNumber(), Size, useWindowSize(), Donation
 
 ### Community 8 - "compilerOptions"
 Cohesion: 0.11
@@ -236,25 +251,77 @@ Nodes (3): 3. Semantic color tokens, Dark theme, Light theme
 Cohesion: 0.67
 Nodes (3): 5. Typography, Type scale, Typography rules
 
+### Community 61 - "Layout.tsx"
+Cohesion: 0.47
+Nodes (3): Footer(), LayoutProps, Meta()
+
+### Community 62 - "theme.ts"
+Cohesion: 0.33
+Nodes (5): ButtonPropsColorOverrides, @mui/material/Button, @mui/material/styles, Palette, PaletteOptions
+
+### Community 63 - "telegram/mod.rs"
+Cohesion: 0.13
+Nodes (20): auth_error(), command_request(), Driver, email_code_can_be_resent_at_telegram_request(), music_probe_page(), MusicProbePage, phone_is_valid(), playable_music_message() (+12 more)
+
+### Community 64 - "SourceSnapshot"
+Cohesion: 0.07
+Nodes (42): Connection, choices_survive_reopen_and_are_scoped_to_account(), kind_name(), music_name(), parse_kind(), parse_music(), populated_choice_database_upgrades_and_discovery_is_atomic(), Option (+34 more)
+
+### Community 65 - "ui/mod.rs"
+Cohesion: 0.20
+Nodes (10): App(), LibraryPlaceholder(), Element, EventHandler, Option, Signal, String, send() (+2 more)
+
+### Community 67 - "SourceEngine"
+Cohesion: 0.08
+Nodes (38): BTreeMap, BTreeSet, Send, TdJson, a_new_scan_starts_progress_at_zero(), cache_only_delete_does_not_recheck_a_finished_chat(), ChatMeta, completed_discovery_survives_restart_without_a_new_scan() (+30 more)
+
+### Community 72 - "[slug].tsx"
+Cohesion: 0.16
+Nodes (15): ScrollTop(), docsDirectory, getAllDocs(), getDocBySlug(), getDocSlugs(), SITE_BASE_PATH, markdownToHtml(), getStaticProps() (+7 more)
+
+### Community 74 - "MainActivity"
+Cohesion: 0.31
+Nodes (5): Bundle, Context, MainActivity, WebView, WryActivity
+
+### Community 75 - "[lang]/index.tsx"
+Cohesion: 0.20
+Nodes (11): HeroTitle(), Layout(), DOWNLOAD_BASE_URL, DOWNLOAD_URL, SITE_NAME, TAG_NAME, VAZIRMATN_CDN_URL, getStaticPaths() (+3 more)
+
+### Community 76 - "build-android.sh"
+Cohesion: 0.22
+Nodes (8): ANDROID_HOME, ANDROID_NDK_HOME, AR_aarch64_linux_android, CC_aarch64_linux_android, JAVA_HOME, NDK_HOME, PATH, build-android.sh script
+
+### Community 77 - "Link.tsx"
+Cohesion: 0.20
+Nodes (14): Header(), LanguageMenu(), getLanguages(), getLocalCaption(), Anchor, Link, LinkProps, NextLinkComposed (+6 more)
+
+### Community 78 - "Implementation status"
+Cohesion: 0.40
+Nodes (4): Implementation status, Implemented, Rust learning note, Verification
+
+### Community 79 - "Android setup"
+Cohesion: 0.50
+Nodes (3): Android setup, Prerequisites, Telegram app credentials
+
 ## Knowledge Gaps
-- **261 isolated node(s):** `music_app`, `music_core`, `name`, `version`, `author` (+256 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 329 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **16 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **278 isolated node(s):** `music_app`, `Step`, `music_core`, `name`, `version` (+273 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 382 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **18 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `react` connect `FontPanel.tsx` to `[slug].tsx`, `website/package.json`, `constants.ts`, `DonationView.tsx`?**
-  _High betweenness centrality (0.046) - this node is a cross-community bridge._
-- **Why does `dependencies` connect `dependencies` to `website/package.json`?**
-  _High betweenness centrality (0.035) - this node is a cross-community bridge._
-- **Why does `react-i18next` connect `[slug].tsx` to `FontPanel.tsx`, `website/package.json`, `DonationView.tsx`?**
+- **Why does `SourceEngine` connect `SourceEngine` to `SourceSnapshot`, `telegram/mod.rs`?**
+  _High betweenness centrality (0.031) - this node is a cross-community bridge._
+- **Why does `SourceSnapshot` connect `SourceSnapshot` to `AuthService`, `ui/mod.rs`, `SourceEngine`, `telegram/mod.rs`?**
   _High betweenness centrality (0.026) - this node is a cross-community bridge._
-- **What connects `music_app`, `music_core`, `name` to the rest of the system?**
-  _261 weakly-connected nodes found - possible documentation gaps or missing edges._
-- **Should `[slug].tsx` be split into smaller, more focused modules?**
-  _Cohesion score 0.06634615384615385 - nodes in this community are weakly interconnected._
+- **Why does `react` connect `i18n.ts` to `FontPanel.tsx`, `website/package.json`, `DonationView.tsx`, `[lang]/index.tsx`, `Link.tsx`, `Layout.tsx`?**
+  _High betweenness centrality (0.022) - this node is a cross-community bridge._
+- **What connects `music_app`, `Step`, `music_core` to the rest of the system?**
+  _278 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Should `AuthService` be split into smaller, more focused modules?**
+  _Cohesion score 0.10846560846560846 - nodes in this community are weakly interconnected._
 - **Should `FontPanel.tsx` be split into smaller, more focused modules?**
-  _Cohesion score 0.09855072463768116 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.09250693802035152 - nodes in this community are weakly interconnected._
 - **Should `website/package.json` be split into smaller, more focused modules?**
-  _Cohesion score 0.052564102564102565 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.046464646464646465 - nodes in this community are weakly interconnected._

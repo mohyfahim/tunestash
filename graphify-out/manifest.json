@@ -756,9 +756,9 @@
     "semantic_hash": ""
   },
   "crates/music_app/src/adapters/telegram/sources.rs": {
-    "mtime": 1791542959.7303407,
-    "seen": 1791542983.898074,
-    "ast_hash": "ffd7f6ec5fc72515305b5dbd25a36f69",
+    "mtime": 1791544998.7152054,
+    "seen": 1791545002.4925756,
+    "ast_hash": "e2bc0b1cf5be123c7f300a7bf34717eb",
     "semantic_hash": ""
   },
   "crates/music_app/src/ui/sources.rs": {
