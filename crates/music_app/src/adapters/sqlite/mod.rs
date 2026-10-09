@@ -1,6 +1,8 @@
 //! Account-scoped source choices. This connection is owned by the service
 //! thread; Dioxus never reads SQLite while rendering.
 
+pub mod library;
+
 use music_core::domain::{MusicCheck, SourceChat, SourceKind};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
@@ -52,7 +54,7 @@ impl SourceStore {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version > 2 {
+        if version > 3 {
             return Err("Source database was created by a newer app version.".into());
         }
         connection
@@ -86,7 +88,33 @@ impl SourceStore {
                  CREATE TABLE IF NOT EXISTS source_setup_complete (
                    account_id INTEGER PRIMARY KEY
                  );
-                 PRAGMA user_version = 2;
+                 CREATE TABLE IF NOT EXISTS indexed_tracks (
+                   account_id INTEGER NOT NULL,
+                   chat_id INTEGER NOT NULL,
+                   message_id INTEGER NOT NULL,
+                   media_type TEXT NOT NULL,
+                   message_date INTEGER NOT NULL,
+                   title TEXT NOT NULL,
+                   artist TEXT NOT NULL,
+                   filename TEXT NOT NULL,
+                   duration_seconds INTEGER,
+                   cover_data TEXT,
+                   scan_generation INTEGER NOT NULL,
+                   PRIMARY KEY(account_id, chat_id, message_id)
+                 );
+                 CREATE INDEX IF NOT EXISTS indexed_tracks_recent
+                   ON indexed_tracks(account_id, message_date DESC, chat_id DESC, message_id DESC);
+                 CREATE TABLE IF NOT EXISTS library_scan_state (
+                   account_id INTEGER NOT NULL,
+                   chat_id INTEGER NOT NULL,
+                   generation INTEGER NOT NULL DEFAULT 1,
+                   audio_cursor INTEGER NOT NULL DEFAULT 0,
+                   document_cursor INTEGER NOT NULL DEFAULT 0,
+                   audio_done INTEGER NOT NULL DEFAULT 0,
+                   document_done INTEGER NOT NULL DEFAULT 0,
+                   PRIMARY KEY(account_id, chat_id)
+                 );
+                 PRAGMA user_version = 3;
                  COMMIT;",
             )
             .map_err(|error| error.to_string())?;
@@ -294,6 +322,18 @@ impl SourceStore {
         transaction
             .execute(
                 "DELETE FROM source_choices WHERE account_id = ?1",
+                [account_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM indexed_tracks WHERE account_id = ?1",
+                [account_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM library_scan_state WHERE account_id = ?1",
                 [account_id],
             )
             .map_err(|error| error.to_string())?;

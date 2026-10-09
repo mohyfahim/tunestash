@@ -1,5 +1,6 @@
 //! Welcome, Telegram authentication, and music source selection.
 
+mod library;
 mod sources;
 
 use crate::runtime::AuthService;
@@ -37,21 +38,6 @@ fn show_library(user_id: i64, sources: &SourceSnapshot, temporary_sources: Optio
         && temporary_sources != Some(user_id)
 }
 
-#[component]
-fn LibraryPlaceholder(on_back: EventHandler<()>) -> Element {
-    rsx! {
-        main { class: "library-placeholder",
-            div { class: "library-placeholder-layout",
-                button { class: "library-back", r#type: "button",
-                    onclick: move |_| on_back.call(()),
-                    "Back to Sources"
-                }
-                h1 { "Library" }
-            }
-        }
-    }
-}
-
 #[allow(non_snake_case)]
 pub fn App() -> Element {
     let mut started = use_signal(|| false);
@@ -72,6 +58,11 @@ pub fn App() -> Element {
             .map(|service| service.source_snapshot())
             .unwrap_or_default()
     });
+    let mut library_snapshot = use_signal(|| {
+        AuthService::global()
+            .map(|service| service.library_snapshot())
+            .unwrap_or_default()
+    });
     let mut temporary_sources = use_signal(|| None::<i64>);
     let mut phone = use_signal(String::new);
     let mut code = use_signal(String::new);
@@ -86,6 +77,16 @@ pub fn App() -> Element {
         let mut changes = service.subscribe();
         while changes.changed().await.is_ok() {
             snapshot.set(changes.borrow_and_update().clone());
+        }
+    });
+
+    use_future(move || async move {
+        let Ok(service) = AuthService::global() else {
+            return;
+        };
+        let mut changes = service.subscribe_library();
+        while changes.changed().await.is_ok() {
+            library_snapshot.set(changes.borrow_and_update().clone());
         }
     });
 
@@ -209,7 +210,7 @@ pub fn App() -> Element {
         document::Style { {include_str!("../../assets/style.css")} }
         if let Some(user_id) = ready_user {
             if show_library(user_id, &source_state, *temporary_sources.read()) {
-                LibraryPlaceholder { on_back: move |_| temporary_sources.set(Some(user_id)) }
+                library::LibraryView { snapshot: library_snapshot.read().clone() }
             } else {
                 sources::SourceView {
                     snapshot: source_state,

@@ -17,6 +17,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
 const MAX_INFLIGHT: usize = 8;
 // Audio filter returns only audio, so one hit is enough to qualify a chat.
 const AUDIO_SEARCH_LIMIT: i32 = 1;
+const DOCUMENT_SEARCH_LIMIT: i32 = 50;
 
 #[derive(Clone)]
 enum Job {
@@ -39,6 +40,7 @@ enum Job {
         chat_id: i64,
         before: i64,
         epoch: u64,
+        documents: bool,
     },
 }
 
@@ -90,7 +92,6 @@ pub struct SourceEngine {
     lists_ready: bool,
     jobs: VecDeque<Job>,
     active: BTreeMap<i64, (Job, Instant)>,
-    next_extra: i64,
     logout_account: Option<i64>,
     scan_epochs: BTreeMap<i64, u64>,
     proof_messages: BTreeMap<i64, i64>,
@@ -101,6 +102,10 @@ pub struct SourceEngine {
 }
 
 impl SourceEngine {
+    pub fn snapshot(&self) -> &SourceSnapshot {
+        &self.snapshot
+    }
+
     pub fn new(path: &str, updates: watch::Sender<SourceSnapshot>) -> Self {
         let store = SourceStore::open(Path::new(path));
         let mut snapshot = SourceSnapshot::default();
@@ -120,7 +125,6 @@ impl SourceEngine {
             lists_ready: false,
             jobs: VecDeque::new(),
             active: BTreeMap::new(),
-            next_extra: 1000,
             logout_account: None,
             scan_epochs: BTreeMap::new(),
             proof_messages: BTreeMap::new(),
@@ -382,7 +386,7 @@ impl SourceEngine {
         self.snapshot.signing_out = true;
         self.snapshot.error = None;
         self.publish();
-        if td.send(&json!({"@type":"logOut", "@extra":999})).is_err() {
+        if td.send(&json!({"@type":"logOut", "@extra":-3})).is_err() {
             self.logout_account = None;
             self.snapshot.signing_out = false;
             self.fail("Couldn't sign out of Telegram. Try again.");
@@ -671,7 +675,7 @@ impl SourceEngine {
             }
             return true;
         }
-        if value["@extra"] == 999 && self.logout_account.is_some() {
+        if value["@extra"] == -3 && self.logout_account.is_some() {
             if value["@type"] == "error" {
                 self.logout_account = None;
                 self.snapshot.signing_out = false;
@@ -842,7 +846,8 @@ impl SourceEngine {
                 chat_id,
                 before,
                 epoch,
-            } => self.process_probe(value, chat_id, before, epoch),
+                documents,
+            } => self.process_probe(value, chat_id, before, epoch, documents),
         }
         true
     }
@@ -977,6 +982,7 @@ impl SourceEngine {
             chat_id,
             before: 0,
             epoch,
+            documents: false,
         });
     }
 
@@ -1141,7 +1147,14 @@ impl SourceEngine {
         self.publish();
     }
 
-    fn process_probe(&mut self, value: &Value, chat_id: i64, before: i64, epoch: u64) {
+    fn process_probe(
+        &mut self,
+        value: &Value,
+        chat_id: i64,
+        before: i64,
+        epoch: u64,
+        documents: bool,
+    ) {
         match super::music_probe_page(value, before) {
             super::MusicProbePage::Found(message_id) => self.mark_found(chat_id, message_id),
             super::MusicProbePage::Next(before) => {
@@ -1149,6 +1162,15 @@ impl SourceEngine {
                     chat_id,
                     before,
                     epoch,
+                    documents,
+                });
+            }
+            super::MusicProbePage::Exhausted if !documents => {
+                self.enqueue_job(Job::Audio {
+                    chat_id,
+                    before: 0,
+                    epoch,
+                    documents: true,
                 });
             }
             super::MusicProbePage::Exhausted => self.mark_empty(chat_id),
@@ -1249,16 +1271,19 @@ impl SourceEngine {
                 json!({"@type":"getSupergroup", "supergroup_id":supergroup_id})
             }
             Job::Audio {
-                chat_id, before, ..
+                chat_id,
+                before,
+                documents,
+                ..
             } => {
                 json!({"@type":"searchChatMessages", "chat_id":chat_id,
                     "topic_id":null, "query":"", "sender_id":null,
-                    "from_message_id":before, "offset":0, "limit":AUDIO_SEARCH_LIMIT,
-                    "filter":{"@type":"searchMessagesFilterAudio"}})
+                    "from_message_id":before, "offset":0,
+                    "limit":if *documents { DOCUMENT_SEARCH_LIMIT } else { AUDIO_SEARCH_LIMIT },
+                    "filter":{"@type":if *documents { "searchMessagesFilterDocument" } else { "searchMessagesFilterAudio" }}})
             }
         };
-        self.next_extra += 1;
-        let extra = self.next_extra;
+        let extra = td.next_request_id();
         let mut request = request;
         request["@extra"] = json!(extra);
         if td.send(&request).is_err() {
@@ -1428,6 +1453,7 @@ mod tests {
                     chat_id: 42,
                     before: 0,
                     epoch: 0,
+                    documents: false,
                 },
                 Instant::now(),
             ),
@@ -1829,7 +1855,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_audio_history_marks_chat_empty_without_document_search() {
+    fn empty_audio_history_checks_documents_before_marking_chat_empty() {
         let (mut engine, path) = selected_engine("audio-only-empty");
         engine.snapshot.stage = DiscoveryStage::CheckingMusic;
         engine.snapshot.chats[0].music = MusicCheck::Checking;
@@ -1842,7 +1868,29 @@ mod tests {
                 supergroup: None,
             },
         );
-        engine.process_probe(&json!({"messages":[],"next_from_message_id":0}), 42, 0, 0);
+        engine.process_probe(
+            &json!({"messages":[],"next_from_message_id":0}),
+            42,
+            0,
+            0,
+            false,
+        );
+        assert!(engine.jobs.iter().any(|job| matches!(
+            job,
+            Job::Audio {
+                documents: true,
+                ..
+            }
+        )));
+        assert_eq!(engine.snapshot.chats[0].music, MusicCheck::Checking);
+        engine.jobs.clear();
+        engine.process_probe(
+            &json!({"messages":[],"next_from_message_id":0}),
+            42,
+            0,
+            0,
+            true,
+        );
         assert_eq!(engine.snapshot.chats[0].music, MusicCheck::Empty);
         assert!(engine.jobs.is_empty());
         drop(engine);
@@ -1908,6 +1956,7 @@ mod tests {
                     chat_id: 42,
                     before: 0,
                     epoch: 0,
+                    documents: false,
                 },
                 Instant::now(),
             ),

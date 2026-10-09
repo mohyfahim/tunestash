@@ -108,9 +108,38 @@ Updated: 2026-10-09
   implemented from TDLib's `authorizationStateWaitPassword` state. It was not
   separately exercised with a two-step-enabled account during this check.
 
-Media indexing, playback, offline downloads, the Settings entry point, and a
-light theme remain future work. Source discovery checks message metadata only;
-it does not add tracks to the library.
+## Library increment
+
+- The Library now uses the dark login and Music Sources palette with the mobile
+  layout from `concept/library.png`. Home and Search are black placeholders
+  with persistent dark bottom navigation and dark Android system bars.
+  Category, download, and sorting controls are displayed without active
+  behavior. The mini-player stays hidden until playback exists. Reindex is a
+  manual action in the Library title row, disabled without selected sources or
+  while indexing.
+- Selected Telegram sources receive metadata-only Audio and playable audio
+  Document scans. Indexed rows persist by account, chat, and message ID;
+  per-filter cursors and each result page commit together. A completed scan
+  reconciles removed messages. A completed catalog stays unchanged on launch;
+  first scans and interrupted scans run automatically, while Reindex starts a
+  new full pass. Live new-message, edit, and deletion updates
+  refresh the catalog while the app is open. Source discovery checks Document
+  history after an empty Audio search so document-only chats can qualify.
+- The list shows actual track count, title, artist, source, and embedded
+  minithumbnail where available. Missing artwork uses the TuneStash music mark.
+  The service thread owns SQLite and publishes paginated UI snapshots.
+
+Host tests cover parsing, account/source filtering, first indexing, cursor
+resume, completed-catalog startup, manual Reindex, duplicate prevention, and
+reconciliation. Formatting, host tests, host Clippy, Android-target Rust
+checks, and the APK build pass. The updated APK installed on Samsung SM-A256E
+(Android 14). Its dark empty Library, disabled Reindex button, black Home and
+Search placeholders, bottom navigation, and dark system bars were inspected.
+The device currently shows zero tracks and no selected sources. A populated
+Library, a live Reindex with a selected source, and a cold restart with indexed
+tracks remain unverified. No private account database was inspected.
+Playback, streaming, offline downloads, and the Settings entry point remain
+future work.
 
 ## Rust learning note
 

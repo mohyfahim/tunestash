@@ -2,6 +2,9 @@
 
 #[cfg(any(target_os = "android", test))]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod library;
+#[cfg(any(target_os = "android", test))]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod sources;
 
 #[cfg(all(test, not(target_os = "android")))]
@@ -14,6 +17,11 @@ impl TdJson {
     fn send(&self, _value: &Value) -> Result<(), String> {
         Ok(())
     }
+
+    fn next_request_id(&self) -> i64 {
+        static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -21,7 +29,7 @@ use music_core::domain::AuthSnapshot;
 #[cfg(any(target_os = "android", test))]
 use music_core::domain::{AuthCommand, AuthStage};
 #[cfg(target_os = "android")]
-use music_core::domain::{SourceCommand, SourceSnapshot};
+use music_core::domain::{LibrarySnapshot, SourceCommand, SourceSnapshot};
 #[cfg(any(target_os = "android", test))]
 use serde_json::{Value, json};
 #[cfg(target_os = "android")]
@@ -182,6 +190,7 @@ struct TdJson {
     client_id: i32,
     send: Send,
     receive: Receive,
+    next_extra: std::cell::Cell<i64>,
 }
 
 #[cfg(target_os = "android")]
@@ -209,6 +218,7 @@ impl TdJson {
             client_id,
             send,
             receive,
+            next_extra: std::cell::Cell::new(0),
         })
     }
 
@@ -217,6 +227,12 @@ impl TdJson {
             CString::new(value.to_string()).map_err(|_| "Invalid Telegram request".to_string())?;
         unsafe { (self.send)(self.client_id, request.as_ptr()) };
         Ok(())
+    }
+
+    fn next_request_id(&self) -> i64 {
+        let next = self.next_extra.get() + 1;
+        self.next_extra.set(next);
+        next
     }
 
     fn receive(&self) -> Option<Value> {
@@ -247,10 +263,10 @@ struct Driver {
     snapshot: AuthSnapshot,
     updates: watch::Sender<AuthSnapshot>,
     pending: Option<i64>,
-    next_extra: i64,
     last_phone: String,
     resend_deadline: Option<Instant>,
     sources: sources::SourceEngine,
+    library: library::LibraryEngine,
 }
 
 #[cfg(target_os = "android")]
@@ -260,8 +276,7 @@ impl Driver {
     }
 
     fn send_auth(&mut self, mut request: Value) -> Result<(), String> {
-        self.next_extra += 1;
-        let extra = self.next_extra;
+        let extra = self.td.next_request_id();
         request["@extra"] = json!(extra);
         self.td.send(&request)?;
         self.pending = Some(extra);
@@ -297,7 +312,11 @@ impl Driver {
             self.handle_state(&value["authorization_state"]);
             return;
         }
+        self.library.observe_update(&value);
         if self.sources.handle_value(&self.td, &value) {
+            return;
+        }
+        if self.library.handle_response(&value) {
             return;
         }
         let extra = value["@extra"].as_i64();
@@ -397,9 +416,11 @@ impl Driver {
         self.publish();
         if matches!(self.snapshot.stage, AuthStage::Phone) {
             self.sources.signed_out();
+            self.library.reset();
         }
         if client_closed {
             self.sources.signed_out();
+            self.library.reset();
             match TdJson::load() {
                 Ok(td) => {
                     self.td = td;
@@ -441,6 +462,7 @@ pub fn run(
     commands: Receiver<DriverCommand>,
     updates: watch::Sender<AuthSnapshot>,
     source_updates: watch::Sender<SourceSnapshot>,
+    library_updates: watch::Sender<LibrarySnapshot>,
 ) {
     let td = match TdJson::load() {
         Ok(td) => td,
@@ -450,16 +472,17 @@ pub fn run(
         }
     };
     let sources = sources::SourceEngine::new(&config.source_db, source_updates);
+    let library = library::LibraryEngine::new(&config.source_db, library_updates);
     let mut driver = Driver {
         td,
         config,
         snapshot: AuthSnapshot::default(),
         updates,
         pending: None,
-        next_extra: 0,
         last_phone: String::new(),
         resend_deadline: None,
         sources,
+        library,
     };
     let _ = driver
         .td
@@ -474,6 +497,7 @@ pub fn run(
                 DriverCommand::Source(command) => {
                     driver.sources.handle_command(&driver.td, command)
                 }
+                DriverCommand::Library(command) => driver.library.command(command),
             }
         }
         if let Some(value) = driver.td.receive() {
@@ -481,6 +505,8 @@ pub fn run(
         }
         driver.tick();
         driver.sources.drive(&driver.td);
+        driver.library.sync_sources(driver.sources.snapshot());
+        driver.library.drive(&driver.td);
     }
 }
 

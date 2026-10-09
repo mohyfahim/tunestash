@@ -147,6 +147,39 @@ pub enum SourceCommand {
     ChangeAccount,
 }
 
+/// A single Telegram message in the local, metadata-only library.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackSummary {
+    pub chat_id: i64,
+    pub message_id: i64,
+    pub title: String,
+    pub artist: String,
+    pub filename: String,
+    pub source_name: String,
+    pub date: i64,
+    pub duration_seconds: Option<i64>,
+    /// TDLib supplies this small JPEG inside some audio message metadata.
+    pub cover_data: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LibrarySnapshot {
+    pub account_id: Option<i64>,
+    pub tracks: Vec<TrackSummary>,
+    pub total_count: usize,
+    pub selected_sources: usize,
+    pub indexing_sources: usize,
+    pub has_more: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LibraryCommand {
+    LoadMore,
+    Reindex,
+    Retry,
+}
+
 impl SourceSnapshot {
     pub fn default_chats(&self) -> impl Iterator<Item = &SourceChat> {
         self.chats
