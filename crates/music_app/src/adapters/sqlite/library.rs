@@ -249,6 +249,13 @@ impl LibraryStore {
         self.query_page(account, limit, None, LibrarySort::Recent)
     }
 
+    /// Queue creation must include rows beyond the UI's loaded page.
+    pub fn all_tracks(&self, account: i64, sort: LibrarySort) -> Result<Vec<TrackSummary>, String> {
+        let (_, total) = self.query_page(account, 0, None, sort)?;
+        self.query_page(account, total, None, sort)
+            .map(|(tracks, _)| tracks)
+    }
+
     fn query_page(
         &self,
         account: i64,
@@ -468,6 +475,24 @@ mod tests {
         assert_eq!(a_page[1].message_id, 5);
         assert_eq!(store.page(1, 50, Some('Z')).unwrap().1, 0);
         assert_eq!(store.page(1, 50, Some('2')).unwrap().1, 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn queue_reads_every_track_beyond_the_visible_page() {
+        let (path, mut store) = fixture();
+        store.start_source(1, 10, false).unwrap();
+        let tracks: Vec<_> = (1..=75).map(track).collect();
+        store
+            .save_page(1, 10, MediaFilter::Audio, 0, &tracks)
+            .unwrap();
+        assert_eq!(store.page(1, 50, None).unwrap().0.len(), 50);
+        let recent = store.all_tracks(1, LibrarySort::Recent).unwrap();
+        assert_eq!(recent.len(), 75);
+        assert_eq!(recent[0].message_id, 75);
+        let title = store.all_tracks(1, LibrarySort::Title).unwrap();
+        assert_eq!(title.len(), 75);
+        assert_eq!(title[0].title, "Song 1");
         std::fs::remove_file(path).unwrap();
     }
 

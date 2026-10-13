@@ -5,6 +5,9 @@
 mod library;
 #[cfg(any(target_os = "android", test))]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod playback;
+#[cfg(any(target_os = "android", test))]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod sources;
 
 #[cfg(all(test, not(target_os = "android")))]
@@ -267,6 +270,8 @@ struct Driver {
     resend_deadline: Option<Instant>,
     sources: sources::SourceEngine,
     library: library::LibraryEngine,
+    playback: playback::PlaybackEngine,
+    logout_pending: Option<i64>,
 }
 
 #[cfg(target_os = "android")]
@@ -313,6 +318,9 @@ impl Driver {
             return;
         }
         self.library.observe_update(&value);
+        if self.playback.handle_value(&self.td, &value) {
+            return;
+        }
         if self.sources.handle_value(&self.td, &value) {
             return;
         }
@@ -417,10 +425,16 @@ impl Driver {
         if matches!(self.snapshot.stage, AuthStage::Phone) {
             self.sources.signed_out();
             self.library.reset();
+            if let Some(account) = self.logout_pending.take() {
+                self.playback.logout(account);
+            }
         }
         if client_closed {
             self.sources.signed_out();
             self.library.reset();
+            if let Some(account) = self.logout_pending.take() {
+                self.playback.logout(account);
+            }
             match TdJson::load() {
                 Ok(td) => {
                     self.td = td;
@@ -463,6 +477,7 @@ pub fn run(
     updates: watch::Sender<AuthSnapshot>,
     source_updates: watch::Sender<SourceSnapshot>,
     library_updates: watch::Sender<LibrarySnapshot>,
+    playback_updates: watch::Sender<music_core::domain::PlaybackSnapshot>,
 ) {
     let td = match TdJson::load() {
         Ok(td) => td,
@@ -473,6 +488,8 @@ pub fn run(
     };
     let sources = sources::SourceEngine::new(&config.source_db, source_updates);
     let library = library::LibraryEngine::new(&config.source_db, library_updates);
+    let playback =
+        playback::PlaybackEngine::new(&config.source_db, &config.files_dir, playback_updates);
     let mut driver = Driver {
         td,
         config,
@@ -483,6 +500,8 @@ pub fn run(
         resend_deadline: None,
         sources,
         library,
+        playback,
+        logout_pending: None,
     };
     let _ = driver
         .td
@@ -492,12 +511,28 @@ pub fn run(
             match command {
                 DriverCommand::Auth(command) => driver.handle_command(command),
                 DriverCommand::Source(SourceCommand::ChangeAccount) => {
+                    driver.logout_pending = driver.sources.snapshot().account_id;
+                    let _ = crate::adapters::media::dispatch("stop", "{}");
                     driver.sources.change_account(&driver.td);
                 }
                 DriverCommand::Source(command) => {
                     driver.sources.handle_command(&driver.td, command)
                 }
                 DriverCommand::Library(command) => driver.library.command(command),
+                DriverCommand::Playback(command) => {
+                    driver
+                        .playback
+                        .command(&driver.td, &driver.library, command)
+                }
+                DriverCommand::ReadRange {
+                    key,
+                    offset,
+                    length,
+                    response,
+                } => driver
+                    .playback
+                    .read_range(&driver.td, key, offset, length, response),
+                DriverCommand::MediaEvent(value) => driver.playback.media_event(&driver.td, &value),
             }
         }
         if let Some(value) = driver.td.receive() {
@@ -506,7 +541,15 @@ pub fn run(
         driver.tick();
         driver.sources.drive(&driver.td);
         driver.library.sync_sources(driver.sources.snapshot());
+        let sources = driver.sources.snapshot();
+        driver.playback.set_account(
+            sources
+                .account_id
+                .filter(|_| sources.setup_complete && !sources.signing_out),
+        );
         driver.library.drive(&driver.td);
+        driver.playback.reconcile(&driver.library);
+        driver.playback.tick(&driver.td);
     }
 }
 

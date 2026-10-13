@@ -9,7 +9,7 @@ and uses the Dioxus 0.7.10 Android WebView renderer.
 - Rust 1.98.1, as selected by `rust-toolchain.toml`.
 - Dioxus CLI 0.7.10 (`dx --version`). Install with
   `cargo install dioxus-cli --version 0.7.10 --locked` if absent.
-- JDK 17, Android SDK and NDK, and the Android SDK build tools.
+- JDK 17, Android SDK platforms 34 and 35, the NDK, and Android SDK build tools.
 - ARM64 Rust target: `rustup target add aarch64-linux-android`.
 - CMake, Ninja, Perl, `make`, and `gperf` for the pinned TDLib/OpenSSL build.
 
@@ -42,11 +42,11 @@ cargo check -p music_app --target aarch64-linux-android --features mobile --lock
 ./scripts/build-android.sh
 ```
 
-The script checks JDK 17, SDK platform 34, the NDK, Rust's ARM64 target, and
+The script checks JDK 17, SDK platforms 34 and 35, the NDK, Rust's ARM64 target, and
 Dioxus CLI 0.7.10. On the first build it fetches pinned TDLib and OpenSSL
 sources into ignored `target/native/`, builds ARM64 `libtdjson.so`, then bundles
 the APK. Later builds reuse the native library. It overlays the source-controlled
-splash resources and native library onto Dioxus's generated Gradle project,
+splash resources, native library, Media3 dependencies, and playback service onto Dioxus's generated Gradle project,
 assembles the final APK, and prints its path.
 
 The debug APK is at

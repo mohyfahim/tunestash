@@ -1,7 +1,11 @@
 use crate::runtime::AuthService;
 use crate::ui::home::HomeView;
+use crate::ui::player::{MiniPlayer, PlayerView};
 use dioxus::prelude::*;
-use music_core::domain::{LibraryCommand, LibrarySnapshot, LibrarySort, TrackSummary};
+use music_core::domain::{
+    LibraryCommand, LibrarySnapshot, LibrarySort, PlaybackCommand, PlaybackSnapshot, TrackKey,
+    TrackSummary,
+};
 
 const NOTE: Asset = asset!("/assets/music-note.svg");
 
@@ -13,25 +17,26 @@ enum Tab {
 }
 
 #[component]
-fn TrackRow(track: TrackSummary) -> Element {
+fn TrackRow(track: TrackSummary, account_id: i64, on_play: EventHandler<TrackKey>) -> Element {
     let cover = track
         .cover_data
         .as_ref()
         .map(|data| format!("data:image/jpeg;base64,{data}"));
     rsx! {
         li { class: "library-track", key: "{track.chat_id}-{track.message_id}",
-            div { class: "library-art",
-                if let Some(cover) = cover {
-                    img { src: cover, alt: "" }
-                } else {
-                    img { src: NOTE, alt: "" }
+            button { class: "library-track-open", r#type: "button", aria_label: format!("Play {} by {}", track.title, track.artist),
+                onclick: { let key = TrackKey { account_id, chat_id: track.chat_id, message_id: track.message_id }; move |_| on_play.call(key) },
+                div { class: "library-art",
+                    if let Some(cover) = cover { img { src: cover, alt: "" } }
+                    else { img { src: NOTE, alt: "" } }
+                }
+                div { class: "library-track-copy",
+                    strong { dir: "auto", "{track.title}" }
+                    span { dir: "auto", "{track.artist} · {track.source_name}" }
                 }
             }
-            div { class: "library-track-copy",
-                strong { dir: "auto", "{track.title}" }
-                span { dir: "auto", "{track.artist} · {track.source_name}" }
-            }
-            button { class: "library-row-action", r#type: "button", disabled: true, aria_label: "Download unavailable",
+            button { class: "library-row-action", r#type: "button", aria_label: "Download track",
+                onclick: { let key = TrackKey { account_id, chat_id: track.chat_id, message_id: track.message_id }; move |_| { if let Ok(service) = AuthService::global() { let _ = service.submit_playback(PlaybackCommand::DownloadTrack(key)); } } },
                 svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round",
                     path { d: "M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3" }
                 }
@@ -48,13 +53,20 @@ fn TrackRow(track: TrackSummary) -> Element {
 }
 
 #[component]
-pub fn LibraryView(snapshot: LibrarySnapshot, on_open_sources: EventHandler<()>) -> Element {
+pub fn LibraryView(
+    snapshot: LibrarySnapshot,
+    playback: PlaybackSnapshot,
+    on_open_sources: EventHandler<()>,
+) -> Element {
     let mut tab = use_signal(|| Tab::Home);
+    let mut show_player = use_signal(|| false);
     let is_library = *tab.read() == Tab::Library;
     let current_sort = snapshot.sort;
     rsx! {
         div { class: "music-shell",
-            if is_library {
+            if *show_player.read() && playback.current().is_some() {
+                PlayerView { snapshot: playback.clone(), on_close: move |_| show_player.set(false) }
+            } else if is_library {
                 main { class: "library-screen",
                     header { class: "library-header",
                         h1 { "Library" }
@@ -132,7 +144,12 @@ pub fn LibraryView(snapshot: LibrarySnapshot, on_open_sources: EventHandler<()>)
                                 } else {
                                     ul { class: "library-list",
                                         for track in snapshot.tracks.iter().cloned() {
-                                            TrackRow { track }
+                                            TrackRow { track, account_id: snapshot.account_id.unwrap_or_default(), on_play: move |key| {
+                                                if let Ok(service) = AuthService::global() {
+                                                    let _ = service.submit_playback(PlaybackCommand::PlayLibrary { key, sort: current_sort });
+                                                    show_player.set(true);
+                                                }
+                                            } }
                                         }
                                     }
                                 }
@@ -174,7 +191,10 @@ pub fn LibraryView(snapshot: LibrarySnapshot, on_open_sources: EventHandler<()>)
             } else {
                 main { class: "music-black-page", aria_label: "Search placeholder" }
             }
-            nav { class: "music-bottom-nav", aria_label: "Main navigation",
+            if !*show_player.read() && playback.current().is_some() {
+                MiniPlayer { snapshot: playback.clone(), on_open: move |_| show_player.set(true) }
+            }
+            if !*show_player.read() { nav { class: "music-bottom-nav", aria_label: "Main navigation",
                 button { class: if *tab.read() == Tab::Home { "nav-tab active" } else { "nav-tab" }, r#type: "button", onclick: move |_| tab.set(Tab::Home),
                     svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round", path { d: "m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1V10Z" } }
                     span { "Home" }
@@ -192,7 +212,7 @@ pub fn LibraryView(snapshot: LibrarySnapshot, on_open_sources: EventHandler<()>)
                     svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round", path { d: "M4 4h16v16H4zM4 9h16M8 13h8M8 17h5" } }
                     span { "Library" }
                 }
-            }
+            } }
         }
     }
 }

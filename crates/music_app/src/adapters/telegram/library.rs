@@ -2,7 +2,9 @@
 
 use super::{TdJson, playable_music_message};
 use crate::adapters::sqlite::library::{LibraryStore, MediaFilter, TrackInput};
-use music_core::domain::{LibraryCommand, LibrarySnapshot, LibrarySort, SourceSnapshot};
+use music_core::domain::{
+    LibraryCommand, LibrarySnapshot, LibrarySort, SourceSnapshot, TrackSummary,
+};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -100,6 +102,13 @@ pub struct LibraryEngine {
 }
 
 impl LibraryEngine {
+    pub fn all_tracks(&self, sort: LibrarySort) -> Result<Vec<TrackSummary>, String> {
+        let account = self.account.ok_or("No active music library")?;
+        self.store
+            .as_ref()
+            .ok_or("Music library is unavailable")?
+            .all_tracks(account, sort)
+    }
     pub fn new(path: &str, updates: watch::Sender<LibrarySnapshot>) -> Self {
         let store = LibraryStore::open(Path::new(path));
         let error = store

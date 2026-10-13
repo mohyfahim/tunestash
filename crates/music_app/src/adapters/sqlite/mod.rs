@@ -2,6 +2,7 @@
 //! thread; Dioxus never reads SQLite while rendering.
 
 pub mod library;
+pub mod playback;
 
 use music_core::domain::{MusicCheck, SourceChat, SourceKind};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -54,7 +55,7 @@ impl SourceStore {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version > 3 {
+        if version > 5 {
             return Err("Source database was created by a newer app version.".into());
         }
         connection
@@ -114,7 +115,36 @@ impl SourceStore {
                    document_done INTEGER NOT NULL DEFAULT 0,
                    PRIMARY KEY(account_id, chat_id)
                  );
-                 PRAGMA user_version = 3;
+                 CREATE TABLE IF NOT EXISTS favorite_tracks (
+                   account_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+                   message_id INTEGER NOT NULL,
+                   PRIMARY KEY(account_id, chat_id, message_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS saved_audio (
+                   account_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+                   message_id INTEGER NOT NULL, path TEXT NOT NULL,
+                   size_bytes INTEGER NOT NULL,
+                   PRIMARY KEY(account_id, chat_id, message_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS audio_downloads (
+                   account_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+                   message_id INTEGER NOT NULL, status TEXT NOT NULL,
+                   error TEXT,
+                   PRIMARY KEY(account_id, chat_id, message_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS playback_state (
+                   account_id INTEGER PRIMARY KEY, cursor INTEGER NOT NULL,
+                   position_ms INTEGER NOT NULL, shuffle INTEGER NOT NULL,
+                   repeat_mode TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS playback_queue (
+                   account_id INTEGER NOT NULL, slot INTEGER NOT NULL,
+                   chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
+                   title TEXT NOT NULL, artist TEXT NOT NULL, filename TEXT NOT NULL,
+                   duration_seconds INTEGER, cover_data TEXT, play_order INTEGER NOT NULL,
+                   PRIMARY KEY(account_id, slot)
+                 );
+                 PRAGMA user_version = 5;
                  COMMIT;",
             )
             .map_err(|error| error.to_string())?;
@@ -331,6 +361,20 @@ impl SourceStore {
                 [account_id],
             )
             .map_err(|error| error.to_string())?;
+        for table in [
+            "favorite_tracks",
+            "saved_audio",
+            "audio_downloads",
+            "playback_queue",
+            "playback_state",
+        ] {
+            transaction
+                .execute(
+                    &format!("DELETE FROM {table} WHERE account_id = ?1"),
+                    [account_id],
+                )
+                .map_err(|error| error.to_string())?;
+        }
         transaction
             .execute(
                 "DELETE FROM library_scan_state WHERE account_id = ?1",

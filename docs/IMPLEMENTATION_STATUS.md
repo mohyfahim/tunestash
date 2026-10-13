@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated: 2026-10-09
+Updated: 2026-10-13
 
 ## Implemented
 
@@ -119,7 +119,7 @@ Updated: 2026-10-09
 - The Library now uses the dark login and Music Sources palette with the mobile
   layout from `concept/library.png`. Search remains a black placeholder with
   persistent dark bottom navigation and dark Android system bars.
-  Category, download, and sorting controls are displayed without active
+  Category and sorting controls are displayed without active
   behavior. The mini-player stays hidden until playback exists. The icon-only
   Reindex action sits in the Library title row and is disabled without selected
   sources or while indexing.
@@ -149,8 +149,7 @@ tapping an active letter restored the full list. The rail stayed visible while
 scrolling, and its lower letters were reachable by scrolling the rail. A cold
 relaunch restored the 383-track catalog. A live Reindex was not exercised.
 No private account database was inspected.
-Playback, streaming, offline downloads, and a dedicated Settings screen remain
-future work.
+A dedicated Settings screen remains future work.
 
 ## Home increment
 
@@ -164,8 +163,7 @@ future work.
   See all opens Library in recent order; tapping the Library tab restores title
   order. Sorting and source filtering remain on the service thread.
 - Listening history and playlists have truthful empty states. Their actions
-  and the mini-player stay hidden until those capabilities exist. No sample
-  tracks or playback success states are shown.
+  stay hidden until those capabilities exist. No sample tracks are shown.
 
 Host tests cover recent ordering and stable ties, account and enabled-source
 filtering, arrival of tracks during indexing, and title/recent sort switching.
@@ -179,6 +177,60 @@ at the device's normal width and a temporary 960px physical width showed no
 clipping; the phone's original display size was restored. None of the twelve
 recent tracks had an embedded cover, so the Home cover-image path was not
 visually checked on this device.
+
+## Main player increment
+
+- Tapping an indexed Library track opens the full-screen player and starts
+  Media3 playback. The Song view follows `concept/main-player.png` with cover
+  art or the TuneStash fallback, metadata, favorite, seek, transport, shuffle,
+  repeat, and offline status. The Queue view lists the full enabled-source
+  library in the active title or recent order, including unloaded pages, and
+  allows direct selection. Closing the player leaves a persistent mini-player.
+  Add to Playlist, Go to Album, Share, and More are visibly unavailable.
+- Rust owns queue order, position, repeat mode, and shuffle. Off advances once;
+  repeat queue wraps; single play stops at the end of the selected track.
+  State survives process restart without autoplay. Android's
+  `MediaSessionService` owns ExoPlayer, media session, audio focus, and the
+  foreground notification. Its native bootstrap can start the Rust worker
+  without an Activity. iOS reports playback unavailable.
+- TDLib resolves each track by account, chat, and message ID. Media3 reads
+  verified available ranges through a native data source while TDLib continues
+  the full download. Completed files are size-checked, copied atomically to
+  app-private storage, and used for offline replay. Media3's decoded embedded
+  cover art replaces a small Telegram thumbnail when available. The database keeps
+  favorites, playback state, incomplete download records, and saved-file
+  records. Interrupted transfers are retried at runtime startup. Missing
+  saved files are invalidated; unavailable messages and buffering failures
+  show errors. The active queue removes tracks from sources that become
+  unavailable and stops if the selected track is removed.
+  Confirmed account logout stops playback and deletes that account's media.
+
+Host tests cover queue ordering beyond the Library page, playback modes,
+persistence without autoplay, favorites, download recovery records, source
+reconciliation, saved-file validation, range reads, and incomplete-copy
+rejection. Formatting, workspace check, workspace Clippy,
+workspace tests, and Android ARM64 Clippy pass. Kotlin compilation and a
+diagnostic APK assembly passed using the locally installed SDK 34 with the
+Media3 SDK metadata check disabled. The tracked build requires SDK 35 for
+Media3 1.6.1; SDK 35 is absent on this machine, so the standard final APK
+build remains unverified.
+
+On Samsung SM-A256E (Android 14), the diagnostic APK opened and streamed a
+Library track, decoded audio before the download finished, saved it, and
+displayed all 383 tracks in Queue. A cold relaunch restored the mini-player
+without autoplay; Play resumed the saved track at its prior position. The
+saved track advanced in airplane mode, and connectivity was restored. A
+saved track also advanced with the screen off; a simulated headset media key
+paused it. Android's notification card showed title, artwork, seek, and
+transport buttons; tapping Next selected the next Rust queue entry. The
+player fit the device's normal 1080 px width and a temporary 960 px width
+without clipped controls; the original display size was restored. A saved
+track's full embedded cover appeared sharply in the player after playback.
+The Activity was force-stopped and `PlayerService` started alone; the process
+created `tunestash-tdlib` worker threads. Stopping that service, relaunching
+the Activity, and pressing Play recreated the session and resumed playback.
+Audio interruption handling, source removal while playing, a lock-screen
+card, and actual account logout remain unverified on device.
 
 ## Rust learning note
 

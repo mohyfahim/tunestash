@@ -1,7 +1,9 @@
 package dev.dioxus.main
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -30,6 +32,13 @@ class MainActivity : WryActivity() {
     }
 
     companion object {
+        @JvmStatic
+        fun playerCommand(context: Context, action: String, payload: String) {
+            val intent = Intent().setClassName(context, "dev.dioxus.main.PlayerService")
+                .putExtra("action", action).putExtra("payload", payload)
+            if (action == "play" && Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
+            else context.startService(intent)
+        }
         private const val ALIAS = "tunestash.tdlib.database.v1"
         private const val PREFS = "tunestash.private.keys"
         private const val KEY = "tdlib_key_ciphertext"

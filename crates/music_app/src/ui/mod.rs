@@ -2,6 +2,7 @@
 
 mod home;
 mod library;
+mod player;
 mod sources;
 
 use crate::runtime::AuthService;
@@ -68,6 +69,11 @@ pub fn App() -> Element {
             .map(|service| service.library_snapshot())
             .unwrap_or_default()
     });
+    let mut playback_snapshot = use_signal(|| {
+        AuthService::global()
+            .map(|service| service.playback_snapshot())
+            .unwrap_or_default()
+    });
     let mut temporary_sources = use_signal(|| None::<i64>);
     let mut phone = use_signal(String::new);
     let mut code = use_signal(String::new);
@@ -92,6 +98,16 @@ pub fn App() -> Element {
         let mut changes = service.subscribe_library();
         while changes.changed().await.is_ok() {
             library_snapshot.set(changes.borrow_and_update().clone());
+        }
+    });
+
+    use_future(move || async move {
+        let Ok(service) = AuthService::global() else {
+            return;
+        };
+        let mut changes = service.subscribe_playback();
+        while changes.changed().await.is_ok() {
+            playback_snapshot.set(changes.borrow_and_update().clone());
         }
     });
 
@@ -217,6 +233,7 @@ pub fn App() -> Element {
             if show_music_shell(user_id, &source_state, *temporary_sources.read()) {
                 library::LibraryView {
                     snapshot: library_snapshot.read().clone(),
+                    playback: playback_snapshot.read().clone(),
                     on_open_sources: move |_| temporary_sources.set(Some(user_id)),
                 }
             } else {

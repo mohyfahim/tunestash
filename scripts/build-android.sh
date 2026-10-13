@@ -35,8 +35,8 @@ if ! "$JAVA_HOME/bin/java" -version 2>&1 | grep -Eq 'version "17(\.|\")'; then
 fi
 
 ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-if [[ -z "$ANDROID_HOME" || ! -f "$ANDROID_HOME/platforms/android-34/android.jar" ]]; then
-  echo "Set ANDROID_HOME to an Android SDK with platform 34 installed." >&2
+if [[ -z "$ANDROID_HOME" || ! -f "$ANDROID_HOME/platforms/android-34/android.jar" || ! -f "$ANDROID_HOME/platforms/android-35/android.jar" ]]; then
+  echo "Set ANDROID_HOME to an Android SDK with platforms 34 and 35 installed." >&2
   exit 1
 fi
 
@@ -79,6 +79,9 @@ cd "$repo_root"
 for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
   rm -f "$repo_root/target/dx/TuneStash/debug/android/app/app/src/main/res/mipmap-$density/ic_launcher.png"
 done
+# The service depends on Media3, which is added only after Dioxus's initial
+# generated-project build. Remove the previous overlay before that build.
+rm -f "$repo_root/target/dx/TuneStash/debug/android/app/app/src/main/kotlin/dev/dioxus/main/PlayerService.kt"
 dx bundle --android --target aarch64-linux-android --package-types apk --package music_app --locked
 
 # dx owns generated Gradle files, so apply the native resource and library
@@ -87,6 +90,7 @@ generated="$repo_root/target/dx/TuneStash/debug/android/app"
 main="$generated/app/src/main"
 mkdir -p "$main/jniLibs/arm64-v8a" "$main/res/values-v31"
 cp "$tdlib" "$main/jniLibs/arm64-v8a/libtdjson.so"
+cp "$repo_root/crates/music_app/android/PlayerService.kt" "$main/kotlin/dev/dioxus/main/PlayerService.kt"
 cp "$repo_root/android/res/drawable/"*.xml "$main/res/drawable/"
 cp "$repo_root/android/res/values/colors.xml" "$main/res/values/tunestash_colors.xml"
 cp "$repo_root/android/res/values/styles.xml" "$main/res/values/tunestash_styles.xml"
@@ -104,9 +108,33 @@ manifest = path.read_text()
 old = 'android:theme="@style/AppTheme"'
 if old not in manifest:
     raise SystemExit('Could not locate generated Android theme')
-path.write_text(manifest.replace(old, 'android:theme="@style/TuneStashTheme"', 1))
+manifest = manifest.replace(old, 'android:theme="@style/TuneStashTheme"', 1)
+manifest = manifest.replace('<application ', '''<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <application ''', 1)
+manifest = manifest.replace('</application>', '''<service android:name="dev.dioxus.main.PlayerService"
+            android:exported="true" android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
+    </application>''', 1)
+path.write_text(manifest)
 PY
-( cd "$generated" && ./gradlew :app:assembleDebug --offline )
+python3 - "$generated/app/build.gradle.kts" <<'PY'
+from pathlib import Path
+import sys
+import re
+path = Path(sys.argv[1])
+gradle = path.read_text()
+gradle = re.sub(r'^\s*implementation\("androidx\.media3:media3-(?:exoplayer|session):[^\"]+"\)\s*\n', '', gradle, flags=re.MULTILINE)
+gradle = gradle.replace('compileSdk = 34', 'compileSdk = 35', 1)
+marker = 'implementation("androidx.media3:media3-exoplayer:1.6.1")'
+if marker not in gradle:
+    gradle = gradle.replace('dependencies {', 'dependencies {\n    ' + marker + '\n    implementation("androidx.media3:media3-session:1.6.1")', 1)
+path.write_text(gradle)
+PY
+( cd "$generated" && ./gradlew :app:assembleDebug )
 
 apk="$repo_root/target/dx/TuneStash/debug/android/app/app/build/outputs/apk/debug/app-debug.apk"
 if [[ ! -s "$apk" ]]; then
