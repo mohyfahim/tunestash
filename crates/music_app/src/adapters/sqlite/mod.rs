@@ -45,6 +45,46 @@ fn parse_music(music: &str) -> MusicCheck {
     }
 }
 
+fn migrate_storage(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(saved_audio)")
+        .map_err(|error| error.to_string())?;
+    let columns: Vec<String> = statement
+        .query_map([], |row| row.get(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+    connection
+        .execute_batch("BEGIN IMMEDIATE;")
+        .map_err(|error| error.to_string())?;
+    if !columns.iter().any(|column| column == "title") {
+        connection
+            .execute_batch("ALTER TABLE saved_audio ADD COLUMN title TEXT NOT NULL DEFAULT '';")
+            .map_err(|error| error.to_string())?;
+    }
+    if !columns.iter().any(|column| column == "artist") {
+        connection
+            .execute_batch("ALTER TABLE saved_audio ADD COLUMN artist TEXT NOT NULL DEFAULT '';")
+            .map_err(|error| error.to_string())?;
+    }
+    connection
+        .execute_batch(
+            "UPDATE saved_audio SET
+               title = COALESCE((SELECT title FROM indexed_tracks AS t
+                 WHERE t.account_id=saved_audio.account_id AND t.chat_id=saved_audio.chat_id
+                   AND t.message_id=saved_audio.message_id), ''),
+               artist = COALESCE((SELECT artist FROM indexed_tracks AS t
+                 WHERE t.account_id=saved_audio.account_id AND t.chat_id=saved_audio.chat_id
+                   AND t.message_id=saved_audio.message_id), '');
+             UPDATE audio_downloads SET status='failed', error='Retry save after update'
+               WHERE status IN ('queued','downloading');
+             PRAGMA user_version = 6;
+             COMMIT;",
+        )
+        .map_err(|error| error.to_string())
+}
+
 pub struct SourceStore {
     connection: Connection,
 }
@@ -55,7 +95,7 @@ impl SourceStore {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version > 5 {
+        if version > 6 {
             return Err("Source database was created by a newer app version.".into());
         }
         connection
@@ -144,10 +184,16 @@ impl SourceStore {
                    duration_seconds INTEGER, cover_data TEXT, play_order INTEGER NOT NULL,
                    PRIMARY KEY(account_id, slot)
                  );
-                 PRAGMA user_version = 5;
+                 CREATE TABLE IF NOT EXISTS storage_settings (
+                   account_id INTEGER PRIMARY KEY,
+                   stream_only INTEGER NOT NULL DEFAULT 0 CHECK(stream_only IN (0,1))
+                 );
                  COMMIT;",
             )
             .map_err(|error| error.to_string())?;
+        if version < 6 {
+            self::migrate_storage(&connection)?;
+        }
         Ok(Self { connection })
     }
 
@@ -367,6 +413,7 @@ impl SourceStore {
             "audio_downloads",
             "playback_queue",
             "playback_state",
+            "storage_settings",
         ] {
             transaction
                 .execute(
@@ -522,6 +569,42 @@ mod tests {
         assert!(!reopened.setup_complete(10).unwrap());
         assert!(reopened.setup_complete(11).unwrap());
         drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn storage_upgrade_does_not_resume_ambiguous_old_streams() {
+        let path = std::env::temp_dir().join(format!(
+            "tunestash-storage-upgrade-{}-{}.sqlite",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_file(&path);
+        SourceStore::open(&path).unwrap();
+        let old = Connection::open(&path).unwrap();
+        old.execute(
+            "INSERT INTO audio_downloads(account_id,chat_id,message_id,status,error)
+            VALUES(1,2,3,'downloading',NULL)",
+            [],
+        )
+        .unwrap();
+        old.execute_batch("PRAGMA user_version=5;").unwrap();
+        drop(old);
+        SourceStore::open(&path).unwrap();
+        let upgraded = Connection::open(&path).unwrap();
+        let status: String = upgraded
+            .query_row(
+                "SELECT status FROM audio_downloads WHERE account_id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        let version: i64 = upgraded
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 6);
+        drop(upgraded);
         let _ = std::fs::remove_file(path);
     }
 }

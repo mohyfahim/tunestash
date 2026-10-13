@@ -8,7 +8,7 @@ use music_core::domain::TrackKey;
 use music_core::{
     domain::{
         AuthCommand, AuthSnapshot, LibraryCommand, LibrarySnapshot, PlaybackCommand,
-        PlaybackSnapshot, SourceCommand, SourceSnapshot,
+        PlaybackSnapshot, SourceCommand, SourceSnapshot, StorageCommand, StorageSnapshot,
     },
     ports::TelegramAuth,
 };
@@ -30,6 +30,7 @@ pub enum DriverCommand {
     Source(SourceCommand),
     Library(LibraryCommand),
     Playback(PlaybackCommand),
+    Storage(StorageCommand),
     #[cfg(target_os = "android")]
     ReadRange {
         key: TrackKey,
@@ -47,6 +48,7 @@ pub struct AuthService {
     sources: watch::Receiver<SourceSnapshot>,
     library: watch::Receiver<LibrarySnapshot>,
     playback: watch::Receiver<PlaybackSnapshot>,
+    storage: watch::Receiver<StorageSnapshot>,
 }
 
 impl AuthService {
@@ -88,6 +90,7 @@ impl AuthService {
         let (source_tx, source_rx) = watch::channel(SourceSnapshot::default());
         let (library_tx, library_rx) = watch::channel(LibrarySnapshot::default());
         let (playback_tx, playback_rx) = watch::channel(PlaybackSnapshot::default());
+        let (storage_tx, storage_rx) = watch::channel(StorageSnapshot::default());
         std::thread::Builder::new()
             .name("tunestash-tdlib".into())
             .spawn(move || {
@@ -98,6 +101,7 @@ impl AuthService {
                     source_tx,
                     library_tx,
                     playback_tx,
+                    storage_tx,
                 )
             })
             .map_err(|_| "Cannot start Telegram connection.".to_string())?;
@@ -107,6 +111,7 @@ impl AuthService {
             sources: source_rx,
             library: library_rx,
             playback: playback_rx,
+            storage: storage_rx,
         })
     }
 
@@ -153,6 +158,20 @@ impl AuthService {
         self.commands
             .try_send(DriverCommand::Playback(command))
             .map_err(|_| "Playback is busy. Try again.".into())
+    }
+
+    pub fn storage_snapshot(&self) -> StorageSnapshot {
+        self.storage.borrow().clone()
+    }
+
+    pub fn subscribe_storage(&self) -> watch::Receiver<StorageSnapshot> {
+        self.storage.clone()
+    }
+
+    pub fn submit_storage(&self, command: StorageCommand) -> Result<(), String> {
+        self.commands
+            .try_send(DriverCommand::Storage(command))
+            .map_err(|_| "Storage is busy. Try again.".into())
     }
 
     #[cfg(target_os = "android")]

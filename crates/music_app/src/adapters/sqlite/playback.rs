@@ -1,4 +1,4 @@
-use music_core::domain::{PlaybackSnapshot, QueueTrack, RepeatMode, TrackKey};
+use music_core::domain::{PlaybackSnapshot, QueueTrack, RepeatMode, StoredAudio, TrackKey};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
@@ -11,6 +11,9 @@ impl PlaybackStore {
         let connection = Connection::open(path).map_err(|e| e.to_string())?;
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|e| e.to_string())?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(2))
             .map_err(|e| e.to_string())?;
         Ok(Self { connection })
     }
@@ -44,25 +47,34 @@ impl PlaybackStore {
             params![key.account_id, key.chat_id, key.message_id], |r| Ok((r.get(0)?, r.get(1)?))
         ).optional().map_err(|e| e.to_string())?;
         match saved {
-            Some((path, size))
-                if std::fs::metadata(&path)
-                    .is_ok_and(|m| m.is_file() && m.len() == size as u64 && size > 0) =>
-            {
-                Ok(Some(path))
-            }
-            Some(_) => {
-                self.connection.execute("DELETE FROM saved_audio WHERE account_id=?1 AND chat_id=?2 AND message_id=?3",
-                    params![key.account_id, key.chat_id, key.message_id]).map_err(|e| e.to_string())?;
-                Ok(None)
-            }
+            Some((path, size)) => match std::fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() && size > 0 && metadata.len() == size as u64 => {
+                    Ok(Some(path))
+                }
+                Ok(_) => {
+                    self.connection.execute("DELETE FROM saved_audio WHERE account_id=?1 AND chat_id=?2 AND message_id=?3",
+                        params![key.account_id, key.chat_id, key.message_id]).map_err(|e| e.to_string())?;
+                    Ok(None)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    self.connection.execute("DELETE FROM saved_audio WHERE account_id=?1 AND chat_id=?2 AND message_id=?3",
+                        params![key.account_id, key.chat_id, key.message_id]).map_err(|e| e.to_string())?;
+                    Ok(None)
+                }
+                Err(error) => Err(format!("Could not inspect saved audio: {error}")),
+            },
             None => Ok(None),
         }
     }
 
     pub fn save_file(&self, key: TrackKey, path: &Path, size: u64) -> Result<(), String> {
         self.connection.execute(
-            "INSERT INTO saved_audio(account_id,chat_id,message_id,path,size_bytes) VALUES(?1,?2,?3,?4,?5)
-             ON CONFLICT(account_id,chat_id,message_id) DO UPDATE SET path=excluded.path,size_bytes=excluded.size_bytes",
+            "INSERT INTO saved_audio(account_id,chat_id,message_id,path,size_bytes,title,artist)
+             VALUES(?1,?2,?3,?4,?5,
+               COALESCE((SELECT title FROM indexed_tracks WHERE account_id=?1 AND chat_id=?2 AND message_id=?3),''),
+               COALESCE((SELECT artist FROM indexed_tracks WHERE account_id=?1 AND chat_id=?2 AND message_id=?3),''))
+             ON CONFLICT(account_id,chat_id,message_id) DO UPDATE SET path=excluded.path,size_bytes=excluded.size_bytes,
+               title=excluded.title,artist=excluded.artist",
             params![key.account_id,key.chat_id,key.message_id,path.to_string_lossy(),size as i64]
         ).map_err(|e| e.to_string())?;
         self.connection
@@ -118,9 +130,82 @@ impl PlaybackStore {
             .map_err(|e| e.to_string())
     }
 
-    pub fn invalidate_saved(&self, key: TrackKey) -> Result<(), String> {
-        if let Some(path) = self.saved_path(key)? {
-            let _ = std::fs::remove_file(path);
+    pub fn stream_only(&self, account: i64) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT stream_only FROM storage_settings WHERE account_id=?1",
+                [account],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|value| value.unwrap_or(false))
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn set_stream_only(&self, account: i64, enabled: bool) -> Result<(), String> {
+        self.connection
+            .execute(
+                "INSERT INTO storage_settings(account_id,stream_only) VALUES(?1,?2)
+            ON CONFLICT(account_id) DO UPDATE SET stream_only=excluded.stream_only",
+                params![account, enabled],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn clear_pending(&self, account: i64) -> Result<(), String> {
+        self.connection
+            .execute("DELETE FROM audio_downloads WHERE account_id=?1", [account])
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn saved_entries(&self, account: i64) -> Result<Vec<(TrackKey, String)>, String> {
+        let mut stmt = self
+            .connection
+            .prepare("SELECT chat_id,message_id,path FROM saved_audio WHERE account_id=?1")
+            .map_err(|e| e.to_string())?;
+        stmt.query_map([account], |row| {
+            Ok((
+                TrackKey {
+                    account_id: account,
+                    chat_id: row.get(0)?,
+                    message_id: row.get(1)?,
+                },
+                row.get(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn delete_saved(&self, key: TrackKey, offline_root: &Path) -> Result<(), String> {
+        let path: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT path FROM saved_audio WHERE account_id=?1 AND chat_id=?2 AND message_id=?3",
+                params![key.account_id, key.chat_id, key.message_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(path) = path {
+            let path = Path::new(&path);
+            match std::fs::symlink_metadata(path) {
+                Ok(_) => {
+                    let account_dir = offline_root.join(key.account_id.to_string());
+                    let safe_root = account_dir.canonicalize().map_err(|e| e.to_string())?;
+                    let safe_path = path.canonicalize().map_err(|e| e.to_string())?;
+                    if !safe_path.starts_with(&safe_root) {
+                        return Err("Saved audio path is outside this account's storage.".into());
+                    }
+                    std::fs::remove_file(path)
+                        .map_err(|error| format!("Could not remove saved audio: {error}"))?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("Could not inspect saved audio: {error}")),
+            }
         }
         self.connection
             .execute(
@@ -129,6 +214,50 @@ impl PlaybackStore {
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+
+    pub fn storage_page(
+        &self,
+        account: i64,
+        limit: usize,
+    ) -> Result<(u64, u64, Vec<StoredAudio>, bool), String> {
+        let (count, bytes): (i64, i64) = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*),COALESCE(SUM(size_bytes),0) FROM saved_audio WHERE account_id=?1",
+                [account],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        let mut stmt = self
+            .connection
+            .prepare(
+                "SELECT chat_id,message_id,title,artist,size_bytes FROM saved_audio
+            WHERE account_id=?1 ORDER BY size_bytes DESC,chat_id,message_id LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![account, limit as i64], |row| {
+                Ok(StoredAudio {
+                    key: TrackKey {
+                        account_id: account,
+                        chat_id: row.get(0)?,
+                        message_id: row.get(1)?,
+                    },
+                    title: row.get(2)?,
+                    artist: row.get(3)?,
+                    size_bytes: row.get::<_, i64>(4)?.max(0) as u64,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok((
+            count.max(0) as u64,
+            bytes.max(0) as u64,
+            rows,
+            count as usize > limit,
+        ))
     }
 
     pub fn persist(&mut self, state: &PlaybackSnapshot) -> Result<(), String> {
@@ -321,6 +450,59 @@ mod tests {
             Some(audio.to_string_lossy().into_owned())
         );
         let _ = std::fs::remove_file(audio);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn storage_settings_and_saved_rows_are_account_scoped_and_sorted() {
+        let (path, store) = fixture();
+        let offline = path.with_extension("offline");
+        let account_dir = offline.join("5");
+        std::fs::create_dir_all(&account_dir).unwrap();
+        let small = TrackKey {
+            account_id: 5,
+            chat_id: 6,
+            message_id: 7,
+        };
+        let large = TrackKey {
+            message_id: 8,
+            ..small
+        };
+        for (key, size) in [(small, 3), (large, 9)] {
+            let file = account_dir.join(format!("{}.audio", key.message_id));
+            std::fs::write(&file, vec![b'a'; size]).unwrap();
+            store.save_file(key, &file, size as u64).unwrap();
+        }
+        store.set_stream_only(5, true).unwrap();
+        assert!(store.stream_only(5).unwrap());
+        assert!(!store.stream_only(6).unwrap());
+        let (count, bytes, page, more) = store.storage_page(5, 1).unwrap();
+        assert_eq!((count, bytes, more), (2, 12, true));
+        assert_eq!(page[0].key, large);
+        store.delete_saved(large, &offline).unwrap();
+        assert!(!account_dir.join("8.audio").exists());
+        assert_eq!(store.storage_page(5, 50).unwrap().0, 1);
+        drop(store);
+        assert!(PlaybackStore::open(&path).unwrap().stream_only(5).unwrap());
+        let _ = std::fs::remove_dir_all(offline);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn failed_file_deletion_keeps_its_saved_record() {
+        let (path, store) = fixture();
+        let offline = path.with_extension("offline");
+        let key = TrackKey {
+            account_id: 5,
+            chat_id: 6,
+            message_id: 7,
+        };
+        let file = offline.join("5/7.audio");
+        std::fs::create_dir_all(&file).unwrap();
+        store.save_file(key, &file, 1).unwrap();
+        assert!(store.delete_saved(key, &offline).is_err());
+        assert_eq!(store.storage_page(5, 50).unwrap().0, 1);
+        let _ = std::fs::remove_dir_all(offline);
         let _ = std::fs::remove_file(path);
     }
 }

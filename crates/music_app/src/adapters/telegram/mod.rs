@@ -478,6 +478,7 @@ pub fn run(
     source_updates: watch::Sender<SourceSnapshot>,
     library_updates: watch::Sender<LibrarySnapshot>,
     playback_updates: watch::Sender<music_core::domain::PlaybackSnapshot>,
+    storage_updates: watch::Sender<music_core::domain::StorageSnapshot>,
 ) {
     let td = match TdJson::load() {
         Ok(td) => td,
@@ -488,8 +489,12 @@ pub fn run(
     };
     let sources = sources::SourceEngine::new(&config.source_db, source_updates);
     let library = library::LibraryEngine::new(&config.source_db, library_updates);
-    let playback =
-        playback::PlaybackEngine::new(&config.source_db, &config.files_dir, playback_updates);
+    let playback = playback::PlaybackEngine::new(
+        &config.source_db,
+        &config.files_dir,
+        playback_updates,
+        storage_updates,
+    );
     let mut driver = Driver {
         td,
         config,
@@ -523,6 +528,9 @@ pub fn run(
                     driver
                         .playback
                         .command(&driver.td, &driver.library, command)
+                }
+                DriverCommand::Storage(command) => {
+                    driver.playback.storage_command(&driver.td, command)
                 }
                 DriverCommand::ReadRange {
                     key,

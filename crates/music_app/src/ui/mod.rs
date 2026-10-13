@@ -3,7 +3,9 @@
 mod home;
 mod library;
 mod player;
+mod settings;
 mod sources;
+mod storage;
 
 use crate::runtime::AuthService;
 use dioxus::prelude::*;
@@ -74,7 +76,13 @@ pub fn App() -> Element {
             .map(|service| service.playback_snapshot())
             .unwrap_or_default()
     });
+    let mut storage_snapshot = use_signal(|| {
+        AuthService::global()
+            .map(|service| service.storage_snapshot())
+            .unwrap_or_default()
+    });
     let mut temporary_sources = use_signal(|| None::<i64>);
+    let mut return_settings = use_signal(|| false);
     let mut phone = use_signal(String::new);
     let mut code = use_signal(String::new);
     let mut email = use_signal(String::new);
@@ -115,6 +123,16 @@ pub fn App() -> Element {
         let Ok(service) = AuthService::global() else {
             return;
         };
+        let mut changes = service.subscribe_storage();
+        while changes.changed().await.is_ok() {
+            storage_snapshot.set(changes.borrow_and_update().clone());
+        }
+    });
+
+    use_future(move || async move {
+        let Ok(service) = AuthService::global() else {
+            return;
+        };
         let mut changes = service.subscribe_sources();
         while changes.changed().await.is_ok() {
             source_snapshot.set(changes.borrow_and_update().clone());
@@ -124,11 +142,13 @@ pub fn App() -> Element {
     use_effect(move || {
         if !matches!(&snapshot.read().stage, AuthStage::Ready { .. }) {
             temporary_sources.set(None);
+            return_settings.set(false);
         }
     });
 
     let current = snapshot.read().clone();
     let source_state = source_snapshot.read().clone();
+    let source_onboarding = !source_state.setup_complete;
     let ready_user = match &current.stage {
         AuthStage::Ready { user_id } => Some(*user_id),
         _ => None,
@@ -234,12 +254,14 @@ pub fn App() -> Element {
                 library::LibraryView {
                     snapshot: library_snapshot.read().clone(),
                     playback: playback_snapshot.read().clone(),
-                    on_open_sources: move |_| temporary_sources.set(Some(user_id)),
+                    storage: storage_snapshot.read().clone(),
+                    initial_settings: *return_settings.read(),
+                    on_open_sources: move |_| { return_settings.set(true); temporary_sources.set(Some(user_id)); },
                 }
             } else {
                 sources::SourceView {
                     snapshot: source_state,
-                    onboarding: true,
+                    onboarding: source_onboarding,
                     on_next: move |_| temporary_sources.set(None),
                 }
             }

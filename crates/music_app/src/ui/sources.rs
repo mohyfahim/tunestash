@@ -117,6 +117,9 @@ pub fn SourceView(
                     if onboarding && snapshot.account_id.is_some() && !snapshot.signing_out {
                         button { class: "source-loading-change", r#type: "button", onclick: move |_| confirm_change.set(true), "Change Telegram account" }
                     }
+                    if !onboarding && !snapshot.signing_out {
+                        button { class: "source-loading-change", r#type: "button", onclick: move |_| on_next.call(()), "Back to settings" }
+                    }
                     if failed_loading {
                         div { class: "source-loading-actions",
                             button { class: "source-primary-action", r#type: "button", onclick: move |_| { dispatch(SourceCommand::RetryDiscovery, error); }, "Retry search" }
@@ -139,13 +142,13 @@ pub fn SourceView(
                                     "Resync"
                                 }
                                 button { class: "source-header-action source-next", r#type: "button",
-                                    disabled: snapshot.stage != DiscoveryStage::Complete || snapshot.signing_out,
+                                    disabled: onboarding && (snapshot.stage != DiscoveryStage::Complete || snapshot.signing_out),
                                     onclick: move |_| {
-                                        if setup_complete || dispatch(SourceCommand::FinishSetup, error) {
+                                        if !onboarding || setup_complete || dispatch(SourceCommand::FinishSetup, error) {
                                             on_next.call(());
                                         }
                                     },
-                                    "Next"
+                                    if onboarding { "Next" } else { "Back" }
                                 }
                             }
                         }

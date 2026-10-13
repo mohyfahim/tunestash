@@ -4,7 +4,7 @@ use super::{TdJson, library::LibraryEngine};
 use crate::adapters::{media, sqlite::playback::PlaybackStore};
 use music_core::domain::{
     DownloadStatus, LibrarySort, PlaybackCommand, PlaybackSnapshot, PlaybackStatus, QueueTrack,
-    TrackKey,
+    StorageCommand, StorageSnapshot, TrackKey,
 };
 use serde_json::{Value, json};
 use std::{
@@ -34,7 +34,8 @@ struct PendingRead {
     deadline: Instant,
 }
 
-type CopyResult = (TrackKey, Result<(PathBuf, u64), String>);
+type CopyResult = (TrackKey, u64, Result<(PathBuf, u64), String>);
+type ScanResult = (i64, u64, Result<StorageSnapshot, String>);
 
 pub struct PlaybackEngine {
     account: Option<i64>,
@@ -42,6 +43,21 @@ pub struct PlaybackEngine {
     updates: watch::Sender<PlaybackSnapshot>,
     store: Option<PlaybackStore>,
     media_root: PathBuf,
+    cache_root: PathBuf,
+    data_root: PathBuf,
+    db_path: PathBuf,
+    storage: StorageSnapshot,
+    storage_updates: watch::Sender<StorageSnapshot>,
+    scan_tx: Sender<ScanResult>,
+    scan_rx: Receiver<ScanResult>,
+    scan_generation: u64,
+    visible_limit: usize,
+    next_epoch: u64,
+    epochs: HashMap<TrackKey, u64>,
+    cache_deletes: Vec<(i64, Instant)>,
+    cache_clear_extra: Option<i64>,
+    cache_cleanup_again: bool,
+    startup_cleanup_pending: bool,
     files: HashMap<TrackKey, FileState>,
     resolving: HashMap<i64, TrackKey>,
     reads: Vec<PendingRead>,
@@ -50,12 +66,25 @@ pub struct PlaybackEngine {
     last_persist: Instant,
     last_reconcile: Instant,
     fallback_key: Option<TrackKey>,
+    fallback_attempted: HashSet<TrackKey>,
     recover_downloads: Vec<TrackKey>,
 }
 
 impl PlaybackEngine {
-    pub fn new(db: &str, files_dir: &str, updates: watch::Sender<PlaybackSnapshot>) -> Self {
+    pub fn new(
+        db: &str,
+        files_dir: &str,
+        updates: watch::Sender<PlaybackSnapshot>,
+        storage_updates: watch::Sender<StorageSnapshot>,
+    ) -> Self {
         let (copy_tx, copy_rx) = mpsc::channel();
+        let (scan_tx, scan_rx) = mpsc::channel();
+        let cache_root = Path::new(files_dir).to_path_buf();
+        let data_root = cache_root
+            .ancestors()
+            .nth(3)
+            .unwrap_or(Path::new(files_dir))
+            .to_path_buf();
         Self {
             account: None,
             state: PlaybackSnapshot::default(),
@@ -65,6 +94,21 @@ impl PlaybackEngine {
                 .parent()
                 .unwrap_or(Path::new(files_dir))
                 .join("offline"),
+            cache_root,
+            data_root,
+            db_path: Path::new(db).to_path_buf(),
+            storage: StorageSnapshot::default(),
+            storage_updates,
+            scan_tx,
+            scan_rx,
+            scan_generation: 0,
+            visible_limit: 50,
+            next_epoch: 0,
+            epochs: HashMap::new(),
+            cache_deletes: Vec::new(),
+            cache_clear_extra: None,
+            cache_cleanup_again: false,
+            startup_cleanup_pending: false,
             files: HashMap::new(),
             resolving: HashMap::new(),
             reads: Vec::new(),
@@ -73,6 +117,7 @@ impl PlaybackEngine {
             last_persist: Instant::now(),
             last_reconcile: Instant::now(),
             fallback_key: None,
+            fallback_attempted: HashSet::new(),
             recover_downloads: Vec::new(),
         }
     }
@@ -98,7 +143,13 @@ impl PlaybackEngine {
             .unwrap_or_default();
         self.files.clear();
         self.resolving.clear();
+        self.epochs.clear();
+        self.cache_deletes.clear();
+        self.cache_clear_extra = None;
+        self.cache_cleanup_again = false;
+        self.visible_limit = 50;
         self.fallback_key = None;
+        self.fallback_attempted.clear();
         for read in self.reads.drain(..) {
             let _ = read.response.send(Err("Account changed".into()));
         }
@@ -107,12 +158,267 @@ impl PlaybackEngine {
             .unwrap_or_default();
         self.refresh_current_flags();
         self.publish();
+        self.storage = StorageSnapshot {
+            account_id: account,
+            ..StorageSnapshot::default()
+        };
+        self.storage.stream_only = account
+            .and_then(|id| self.store.as_ref()?.stream_only(id).ok())
+            .unwrap_or(false);
+        if self.storage.stream_only {
+            self.recover_downloads.clear();
+            if let (Some(store), Some(id)) = (&self.store, account) {
+                let _ = store.clear_pending(id);
+            }
+        }
+        self.startup_cleanup_pending = self.storage.stream_only;
+        self.storage_updates.send_replace(self.storage.clone());
+        self.refresh_storage();
     }
 
     pub fn logout(&mut self, account: i64) {
         let _ = media::dispatch("stop", "{}");
         self.set_account(None);
         let _ = std::fs::remove_dir_all(self.media_root.join(account.to_string()));
+    }
+
+    fn publish_storage(&mut self) {
+        self.storage_updates.send_replace(self.storage.clone());
+    }
+
+    fn refresh_storage(&mut self) {
+        let Some(account) = self.account else {
+            return;
+        };
+        self.storage.busy = true;
+        self.publish_storage();
+        self.scan_generation = self.scan_generation.wrapping_add(1);
+        let generation = self.scan_generation;
+        let tx = self.scan_tx.clone();
+        let db = self.db_path.clone();
+        let data = self.data_root.clone();
+        let cache = self.cache_root.clone();
+        let limit = self.visible_limit;
+        std::thread::spawn(move || {
+            let result = measure_storage(&db, &data, &cache, account, limit);
+            let _ = tx.send((account, generation, result));
+        });
+    }
+
+    fn invalidate_copy(&mut self, key: TrackKey) {
+        self.next_epoch = self.next_epoch.wrapping_add(1);
+        self.epochs.insert(key, self.next_epoch);
+        if let Some(file) = self.files.get_mut(&key) {
+            file.copying = false;
+        }
+    }
+
+    fn queue_cache_delete(&mut self, key: TrackKey) {
+        if let Some(file) = self.files.get(&key) {
+            self.cache_deletes
+                .push((file.file_id, Instant::now() + Duration::from_secs(2)));
+        }
+    }
+
+    fn queue_current_cache_delete(&mut self) {
+        if self.storage.stream_only
+            && let Some(key) = self.state.current_key()
+        {
+            self.queue_cache_delete(key);
+        }
+    }
+
+    fn request_cache_cleanup(&mut self, td: &TdJson) {
+        if self.cache_clear_extra.is_some() {
+            self.cache_cleanup_again = true;
+            return;
+        }
+        let extra = td.next_request_id();
+        let request = json!({"@type":"optimizeStorage","size":0,"ttl":0,"count":0,
+            "immunity_delay":0,"file_types":[{"@type":"fileTypeAudio"},{"@type":"fileTypeDocument"}],
+            "chat_ids":[],"exclude_chat_ids":[],"return_deleted_file_statistics":false,
+            "chat_limit":0,"@extra":extra});
+        match td.send(&request) {
+            Ok(()) => {
+                self.cache_clear_extra = Some(extra);
+                self.storage.busy = true;
+                self.publish_storage();
+            }
+            Err(error) => {
+                self.storage.error = Some(format!("Could not request cache cleanup: {error}"));
+                self.publish_storage();
+            }
+        }
+    }
+
+    pub fn storage_command(&mut self, td: &TdJson, command: StorageCommand) {
+        let Some(account) = self.account else {
+            return;
+        };
+        match command {
+            StorageCommand::Refresh => {
+                self.storage.error = None;
+                self.refresh_storage();
+            }
+            StorageCommand::LoadMore => {
+                self.visible_limit = self.visible_limit.saturating_add(50);
+                self.refresh_storage();
+            }
+            StorageCommand::SetStreamOnly(enabled) => {
+                let Some(store) = &self.store else {
+                    return;
+                };
+                if let Err(error) = store.set_stream_only(account, enabled) {
+                    self.storage.error = Some(format!("Could not save Stream only: {error}"));
+                    self.publish_storage();
+                    return;
+                }
+                self.storage.stream_only = enabled;
+                if enabled {
+                    let pending = store.pending_downloads(account).unwrap_or_default();
+                    let _ = store.clear_pending(account);
+                    for key in pending {
+                        self.invalidate_copy(key);
+                        if let Some(file) = self.files.get(&key)
+                            && self.state.current_key() != Some(key)
+                        {
+                            let _ = td.send(&json!({"@type":"cancelDownloadFile",
+                                "file_id":file.file_id,"only_if_pending":false}));
+                        }
+                    }
+                    self.recover_downloads.clear();
+                    self.refresh_current_flags();
+                    self.publish();
+                    if self.state.current_key().is_none()
+                        || self.state.download == DownloadStatus::Saved
+                        || matches!(
+                            self.state.status,
+                            PlaybackStatus::Failed | PlaybackStatus::Idle
+                        )
+                    {
+                        self.request_cache_cleanup(td);
+                    }
+                }
+                self.publish_storage();
+                self.refresh_storage();
+            }
+            StorageCommand::DeleteOffline(key) => {
+                if key.account_id != account {
+                    return;
+                }
+                self.delete_one(td, key);
+                self.refresh_storage();
+            }
+            StorageCommand::ClearAudio => {
+                self.storage.busy = true;
+                self.storage.error = None;
+                self.publish_storage();
+                let _ = media::dispatch("stop", "{}");
+                self.state.status = PlaybackStatus::Paused;
+                for read in self.reads.drain(..) {
+                    let _ = read.response.send(Err("Audio storage was cleared.".into()));
+                }
+                let pending = self.store.as_ref().map(|s| s.pending_downloads(account));
+                let entries = self.store.as_ref().map(|s| s.saved_entries(account));
+                let pending = match pending {
+                    Some(Ok(keys)) => keys,
+                    _ => {
+                        self.storage.error = Some("Could not read pending downloads.".into());
+                        Vec::new()
+                    }
+                };
+                let entries = match entries {
+                    Some(Ok(rows)) => rows,
+                    _ => {
+                        self.storage.error = Some("Could not read saved downloads.".into());
+                        Vec::new()
+                    }
+                };
+                if let Some(store) = &self.store
+                    && store.clear_pending(account).is_err()
+                {
+                    self.storage.error = Some("Could not cancel all pending downloads.".into());
+                }
+                for key in pending
+                    .into_iter()
+                    .chain(entries.iter().map(|(key, _)| *key))
+                {
+                    self.invalidate_copy(key);
+                }
+                let mut failures = 0usize;
+                for (key, _) in entries {
+                    if self
+                        .store
+                        .as_ref()
+                        .is_none_or(|s| s.delete_saved(key, &self.media_root).is_err())
+                    {
+                        failures += 1;
+                    }
+                }
+                if failures > 0 {
+                    self.storage.error = Some(format!(
+                        "Could not remove {failures} saved file(s). Try again."
+                    ));
+                }
+                let offline_dir = self.media_root.join(account.to_string());
+                if let Err(error) = std::fs::remove_dir_all(&offline_dir)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    self.storage.error =
+                        Some(format!("Could not remove all offline files: {error}"));
+                }
+                for file in self.files.values() {
+                    let _ = td.send(&json!({"@type":"cancelDownloadFile","file_id":file.file_id,
+                        "only_if_pending":false}));
+                }
+                self.cache_deletes.clear();
+                self.recover_downloads.clear();
+                self.refresh_current_flags();
+                self.publish();
+                self.request_cache_cleanup(td);
+                self.storage.busy = false;
+                self.publish_storage();
+                self.refresh_storage();
+            }
+        }
+    }
+
+    fn delete_one(&mut self, td: &TdJson, key: TrackKey) {
+        self.invalidate_copy(key);
+        self.reads.retain(|read| {
+            if read.key == key {
+                let _ = read
+                    .response
+                    .send(Err("This saved audio was removed.".into()));
+                false
+            } else {
+                true
+            }
+        });
+        if let Some(store) = &self.store {
+            let _ = store.mark_download(key, "canceled", None);
+            if self.state.current_key() == Some(key) {
+                let _ = media::dispatch("stop", "{}");
+                self.state.status = PlaybackStatus::Paused;
+            }
+            match store.delete_saved(key, &self.media_root) {
+                Ok(()) => {
+                    if self.state.current_key() == Some(key) {
+                        self.state.download = DownloadStatus::Remote;
+                        self.publish();
+                    }
+                    self.queue_cache_delete(key);
+                }
+                Err(error) => {
+                    self.storage.error = Some(error);
+                    self.publish_storage();
+                }
+            }
+        }
+        if let Some(file) = self.files.get(&key) {
+            let _ = td.send(&json!({"@type":"cancelDownloadFile","file_id":file.file_id,
+                "only_if_pending":false}));
+        }
     }
 
     fn refresh_current_flags(&mut self) {
@@ -162,6 +468,7 @@ impl PlaybackEngine {
         self.fallback_key = None;
         self.refresh_current_flags();
         let key = track.key;
+        self.fallback_attempted.remove(&key);
         let saved = self
             .store
             .as_ref()
@@ -211,6 +518,7 @@ impl PlaybackEngine {
                                 cover_data: t.cover_data,
                             })
                             .collect();
+                        self.queue_current_cache_delete();
                         if self.state.load_queue(queue, key) {
                             if was_shuffled {
                                 self.state.shuffle = false;
@@ -253,11 +561,13 @@ impl PlaybackEngine {
                     let _ = media::dispatch("seek", "{\"position\":0}");
                     self.state.position_ms = 0;
                 } else {
+                    self.queue_current_cache_delete();
                     self.state.cursor -= 1;
                     self.prepare(td);
                 }
             }
             PlaybackCommand::Next => {
+                self.queue_current_cache_delete();
                 if self.state.advance(false).is_some() {
                     self.prepare(td);
                 } else {
@@ -267,6 +577,9 @@ impl PlaybackEngine {
                 }
             }
             PlaybackCommand::Select(key) => {
+                if self.state.current_key() != Some(key) {
+                    self.queue_current_cache_delete();
+                }
                 if self.state.select(key) {
                     self.prepare(td);
                 }
@@ -294,6 +607,12 @@ impl PlaybackEngine {
                 }
             }
             PlaybackCommand::Download => {
+                if self.storage.stream_only {
+                    self.state.error =
+                        Some("Turn off Stream only in Storage management to save songs.".into());
+                    self.publish();
+                    return;
+                }
                 if let Some(key) = self.state.current_key() {
                     if self
                         .store
@@ -303,9 +622,7 @@ impl PlaybackEngine {
                     {
                         return;
                     }
-                    if let Some(file) = self.files.get_mut(&key) {
-                        file.copying = false;
-                    }
+                    self.invalidate_copy(key);
                     if let Some(store) = &self.store {
                         let _ = store.mark_download(key, "queued", None);
                     }
@@ -314,16 +631,19 @@ impl PlaybackEngine {
                     if let Some(file) = self.files.get(&key) {
                         let _ = td.send(&json!({"@type":"downloadFile","file_id":file.file_id,"priority":24,"offset":0,"limit":0,"synchronous":false}));
                     }
+                    self.start_copy_if_requested(key);
                 }
             }
             PlaybackCommand::DownloadTrack(key) => {
-                if self.account == Some(key.account_id)
+                if !self.storage.stream_only
+                    && self.account == Some(key.account_id)
                     && self
                         .store
                         .as_ref()
                         .and_then(|s| s.saved_path(key).ok().flatten())
                         .is_none()
                 {
+                    self.invalidate_copy(key);
                     if let Some(store) = &self.store {
                         let _ = store.mark_download(key, "queued", None);
                     }
@@ -332,6 +652,7 @@ impl PlaybackEngine {
                         let _ = td.send(&json!({"@type":"downloadFile","file_id":file.file_id,
                             "priority":24,"offset":0,"limit":0,"synchronous":false}));
                     }
+                    self.start_copy_if_requested(key);
                 }
             }
         }
@@ -345,15 +666,9 @@ impl PlaybackEngine {
         {
             return;
         }
-        if let Some(store) = &self.store {
-            let _ = store.mark_download(key, "queued", None);
-        }
         let extra = td.next_request_id();
         self.resolving.insert(extra, key);
         let _ = td.send(&json!({"@type":"getMessage","chat_id":key.chat_id,"message_id":key.message_id,"@extra":extra}));
-        if self.state.current_key() == Some(key) {
-            self.state.download = DownloadStatus::Downloading;
-        }
     }
 
     pub fn read_range(
@@ -364,7 +679,11 @@ impl PlaybackEngine {
         length: usize,
         response: Sender<Result<Vec<u8>, String>>,
     ) {
-        if self.account != Some(key.account_id) || offset < 0 || length == 0 {
+        if self.account != Some(key.account_id)
+            || self.state.current_key() != Some(key)
+            || offset < 0
+            || length == 0
+        {
             let _ = response.send(Err("Invalid audio range".into()));
             return;
         }
@@ -392,6 +711,20 @@ impl PlaybackEngine {
     }
 
     pub fn handle_value(&mut self, td: &TdJson, value: &Value) -> bool {
+        if self.cache_clear_extra.is_some() && value["@extra"].as_i64() == self.cache_clear_extra {
+            self.cache_clear_extra = None;
+            if value["@type"] == "error" {
+                self.storage.error =
+                    Some("Could not clear all Telegram media cache. Try again.".into());
+                self.publish_storage();
+            }
+            if self.cache_cleanup_again {
+                self.cache_cleanup_again = false;
+                self.request_cache_cleanup(td);
+            }
+            self.refresh_storage();
+            return true;
+        }
         if let Some(extra) = value["@extra"].as_i64()
             && let Some(key) = self.resolving.remove(&extra)
         {
@@ -413,7 +746,9 @@ impl PlaybackEngine {
                         "priority":24,"offset":offset,"limit":0,"synchronous":false}));
                 }
             } else {
-                if let Some(store) = &self.store {
+                if let Some(store) = &self.store
+                    && store.download_status(key).ok().flatten().is_some()
+                {
                     let _ =
                         store.mark_download(key, "failed", Some("Telegram audio is unavailable"));
                 }
@@ -422,7 +757,7 @@ impl PlaybackEngine {
                         "This Telegram audio is no longer accessible. Try another track.".into(),
                     );
                     self.state.status = PlaybackStatus::Failed;
-                    self.state.download = DownloadStatus::Failed;
+                    self.refresh_current_flags();
                     self.publish();
                 }
             }
@@ -477,22 +812,39 @@ impl PlaybackEngine {
             .as_i64()
             .unwrap_or(state.prefix);
         state.complete = local["is_downloading_completed"] == true;
-        if !state.complete
+        self.start_copy_if_requested(key);
+    }
+
+    fn start_copy_if_requested(&mut self, key: TrackKey) {
+        let explicit = self
+            .store
+            .as_ref()
+            .and_then(|store| store.download_status(key).ok().flatten())
+            .is_some_and(|status| status == "queued" || status == "downloading");
+        let Some(state) = self.files.get_mut(&key) else {
+            return;
+        };
+        if explicit
+            && !state.complete
             && let Some(store) = &self.store
         {
             let _ = store.mark_download(key, "downloading", None);
         }
-        if state.complete && !state.copying && !state.path.is_empty() {
+        if explicit && state.complete && !state.copying && !state.path.is_empty() {
             state.copying = true;
+            let epoch = *self.epochs.entry(key).or_insert_with(|| {
+                self.next_epoch = self.next_epoch.wrapping_add(1);
+                self.next_epoch
+            });
             let source = state.path.clone();
             let expected = state.size;
             let dest = self
                 .media_root
                 .join(key.account_id.to_string())
-                .join(format!("{}-{}.audio", key.chat_id, key.message_id));
+                .join(format!("{}-{}-{epoch}.audio", key.chat_id, key.message_id));
             let tx = self.copy_tx.clone();
             std::thread::spawn(move || {
-                let _ = tx.send((key, copy_complete(&source, &dest, expected)));
+                let _ = tx.send((key, epoch, copy_complete(&source, &dest, expected)));
             });
         }
     }
@@ -575,6 +927,7 @@ impl PlaybackEngine {
                 persist = false;
             }
             "ended" => {
+                self.queue_current_cache_delete();
                 if self.state.advance(true).is_some() {
                     self.prepare(td);
                 } else {
@@ -591,13 +944,11 @@ impl PlaybackEngine {
                         .unwrap_or("This audio cannot be played.")
                         .to_string(),
                 );
-                if self.state.download == DownloadStatus::Saved {
-                    if let (Some(store), Some(key)) = (&self.store, self.state.current_key()) {
-                        let _ = store.invalidate_saved(key);
-                    }
-                    self.state.download = DownloadStatus::Failed;
-                } else {
-                    self.fallback_key = self.state.current_key();
+                if self.state.download != DownloadStatus::Saved {
+                    self.fallback_key = self
+                        .state
+                        .current_key()
+                        .filter(|key| !self.fallback_attempted.contains(key));
                 }
             }
             _ => return,
@@ -609,6 +960,7 @@ impl PlaybackEngine {
     }
 
     fn command_without_library(&mut self, td: &TdJson, next: bool) {
+        self.queue_current_cache_delete();
         if next {
             if self.state.advance(false).is_some() {
                 self.prepare(td);
@@ -620,11 +972,49 @@ impl PlaybackEngine {
     }
 
     pub fn tick(&mut self, td: &TdJson) {
+        if self.startup_cleanup_pending {
+            self.startup_cleanup_pending = false;
+            self.request_cache_cleanup(td);
+        }
         for key in std::mem::take(&mut self.recover_downloads) {
             self.ensure_file(td, key);
         }
         self.flush_reads(td);
-        while let Ok((key, result)) = self.copy_rx.try_recv() {
+        if let Some(key) = self.fallback_key
+            && let Some(file) = self.files.get(&key)
+            && file.complete
+            && !file.path.is_empty()
+        {
+            self.fallback_key = None;
+            self.fallback_attempted.insert(key);
+            if let Some(track) = self.state.current().filter(|track| track.key == key) {
+                let payload = json!({"uri":format!("file://{}",file.path),
+                    "title":track.title,"artist":track.artist,
+                    "duration":track.duration_seconds.unwrap_or(0) * 1000,
+                    "media_id":format!("{}:{}:{}",key.account_id,key.chat_id,key.message_id),
+                    "position":self.state.position_ms});
+                if media::dispatch("play", &payload.to_string()).is_ok() {
+                    self.state.status = PlaybackStatus::Loading;
+                    self.state.error = None;
+                    self.publish();
+                }
+            }
+        }
+        while let Ok((key, epoch, result)) = self.copy_rx.try_recv() {
+            let expected = self.epochs.get(&key) == Some(&epoch)
+                && self
+                    .store
+                    .as_ref()
+                    .and_then(|s| s.download_status(key).ok().flatten())
+                    .is_some_and(|status| status == "queued" || status == "downloading")
+                && !self.storage.stream_only;
+            if !expected {
+                if let Ok((path, _)) = result {
+                    let _ = std::fs::remove_file(path);
+                    self.refresh_storage();
+                }
+                continue;
+            }
             match result {
                 Ok((path, size)) => {
                     if self.account != Some(key.account_id) {
@@ -636,6 +1026,7 @@ impl PlaybackEngine {
                         .as_ref()
                         .is_some_and(|store| store.save_file(key, &path, size).is_ok());
                     if saved {
+                        self.refresh_storage();
                         if self.state.current_key() == Some(key) {
                             self.state.download = DownloadStatus::Saved;
                             self.publish();
@@ -669,6 +1060,51 @@ impl PlaybackEngine {
                     }
                 }
             }
+        }
+        while let Ok((account, generation, result)) = self.scan_rx.try_recv() {
+            if self.account != Some(account) || self.scan_generation != generation {
+                continue;
+            }
+            match result {
+                Ok(mut snapshot) => {
+                    snapshot.error = self.storage.error.take();
+                    snapshot.busy = self.cache_clear_extra.is_some();
+                    self.storage = snapshot;
+                }
+                Err(error) => {
+                    self.storage.error = Some(format!("Could not measure storage: {error}"));
+                    self.storage.busy = false;
+                }
+            }
+            self.publish_storage();
+        }
+        let now = Instant::now();
+        let current_file = self
+            .state
+            .current_key()
+            .and_then(|key| self.files.get(&key))
+            .map(|file| file.file_id);
+        let mut pending = Vec::new();
+        let mut cache_changed = false;
+        for (file_id, due) in self.cache_deletes.drain(..) {
+            if due > now
+                || Some(file_id) == current_file
+                    && !matches!(
+                        self.state.status,
+                        PlaybackStatus::Paused | PlaybackStatus::Failed | PlaybackStatus::Idle
+                    )
+            {
+                pending.push((file_id, due));
+            } else {
+                let _ = td.send(&json!({"@type":"cancelDownloadFile","file_id":file_id,
+                    "only_if_pending":false}));
+                let _ = td.send(&json!({"@type":"deleteFile","file_id":file_id}));
+                cache_changed = true;
+            }
+        }
+        self.cache_deletes = pending;
+        if cache_changed {
+            self.refresh_storage();
         }
     }
 
@@ -705,6 +1141,60 @@ impl PlaybackEngine {
     }
 }
 
+fn measure_storage(
+    db: &Path,
+    data_root: &Path,
+    cache_root: &Path,
+    account: i64,
+    limit: usize,
+) -> Result<StorageSnapshot, String> {
+    let store = PlaybackStore::open(db)?;
+    for (key, _) in store.saved_entries(account)? {
+        let _ = store.saved_path(key)?;
+    }
+    let (download_count, download_bytes, downloads, has_more) =
+        store.storage_page(account, limit)?;
+    let app_bytes = tree_bytes(data_root)?;
+    let cache_bytes = tree_bytes(cache_root)?;
+    Ok(StorageSnapshot {
+        account_id: Some(account),
+        app_bytes,
+        download_bytes,
+        download_count,
+        cache_bytes,
+        other_bytes: app_bytes
+            .saturating_sub(download_bytes)
+            .saturating_sub(cache_bytes),
+        stream_only: store.stream_only(account)?,
+        downloads,
+        has_more,
+        ..StorageSnapshot::default()
+    })
+}
+
+fn tree_bytes(root: &Path) -> Result<u64, String> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut total = 0u64;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let metadata = match std::fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        if metadata.is_dir() {
+            total = total.saturating_add(tree_bytes(&entry.path())?);
+        } else if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
+}
+
 fn read_file(path: &str, offset: i64, length: usize) -> Result<Vec<u8>, String> {
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     file.seek(SeekFrom::Start(offset as u64))
@@ -725,15 +1215,25 @@ fn copy_complete(source: &str, dest: &Path, expected: i64) -> Result<(PathBuf, u
     }
     std::fs::create_dir_all(dest.parent().ok_or("Invalid offline path")?).map_err(storage_error)?;
     let part = dest.with_extension("part");
-    let copied = std::fs::copy(source, &part).map_err(storage_error)?;
+    let copied = match std::fs::copy(source, &part) {
+        Ok(copied) => copied,
+        Err(error) => {
+            let _ = std::fs::remove_file(&part);
+            return Err(storage_error(error));
+        }
+    };
     if copied != meta.len() {
         let _ = std::fs::remove_file(&part);
         return Err("Incomplete local copy".into());
     }
-    std::fs::File::open(&part)
-        .and_then(|file| file.sync_all())
-        .map_err(storage_error)?;
-    std::fs::rename(&part, dest).map_err(storage_error)?;
+    if let Err(error) = std::fs::File::open(&part).and_then(|file| file.sync_all()) {
+        let _ = std::fs::remove_file(&part);
+        return Err(storage_error(error));
+    }
+    if let Err(error) = std::fs::rename(&part, dest) {
+        let _ = std::fs::remove_file(&part);
+        return Err(storage_error(error));
+    }
     Ok((dest.to_path_buf(), copied))
 }
 
@@ -748,6 +1248,8 @@ fn storage_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::sqlite::SourceStore;
+    use music_core::domain::LibrarySnapshot;
 
     #[test]
     fn partial_copy_never_becomes_a_saved_file() {
@@ -776,5 +1278,257 @@ mod tests {
         assert_eq!(read_file(path.to_str().unwrap(), 7, 4).unwrap(), b"h");
         assert!(read_file(path.to_str().unwrap(), 8, 4).unwrap().is_empty());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn streaming_does_not_pin_audio_and_stream_only_blocks_new_saves() {
+        let root = std::env::temp_dir().join(format!(
+            "tunestash-storage-flow-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let files = root.join("files/tdlib/files");
+        std::fs::create_dir_all(&files).unwrap();
+        let db = root.join("files/sources.sqlite");
+        SourceStore::open(&db).unwrap();
+        let source = files.join("audio.bin");
+        std::fs::write(&source, b"audio bytes").unwrap();
+        let (playback_tx, _) = watch::channel(PlaybackSnapshot::default());
+        let (storage_tx, _) = watch::channel(StorageSnapshot::default());
+        let mut engine = PlaybackEngine::new(
+            db.to_str().unwrap(),
+            files.to_str().unwrap(),
+            playback_tx,
+            storage_tx,
+        );
+        let key = TrackKey {
+            account_id: 7,
+            chat_id: 8,
+            message_id: 9,
+        };
+        engine.set_account(Some(7));
+        let file = json!({"id":42,"size":11,"local":{"path":source,"download_offset":0,
+            "downloaded_prefix_size":11,"is_downloading_completed":true}});
+        engine.update_file(key, &file);
+        engine.tick(&TdJson);
+        assert!(
+            engine
+                .store
+                .as_ref()
+                .unwrap()
+                .saved_path(key)
+                .unwrap()
+                .is_none()
+        );
+        let (library_tx, _) = watch::channel(LibrarySnapshot::default());
+        let library = LibraryEngine::new(db.to_str().unwrap(), library_tx);
+        engine.command(&TdJson, &library, PlaybackCommand::DownloadTrack(key));
+        for _ in 0..100 {
+            engine.tick(&TdJson);
+            if engine
+                .store
+                .as_ref()
+                .unwrap()
+                .saved_path(key)
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            engine
+                .store
+                .as_ref()
+                .unwrap()
+                .saved_path(key)
+                .unwrap()
+                .is_some()
+        );
+        engine.storage_command(&TdJson, StorageCommand::SetStreamOnly(true));
+        let another = TrackKey {
+            message_id: 10,
+            ..key
+        };
+        engine.command(&TdJson, &library, PlaybackCommand::DownloadTrack(another));
+        assert!(
+            engine
+                .store
+                .as_ref()
+                .unwrap()
+                .download_status(another)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            engine
+                .store
+                .as_ref()
+                .unwrap()
+                .saved_path(key)
+                .unwrap()
+                .is_some()
+        );
+        drop(engine);
+        let (playback_tx, _) = watch::channel(PlaybackSnapshot::default());
+        let (storage_tx, _) = watch::channel(StorageSnapshot::default());
+        let mut restored = PlaybackEngine::new(
+            db.to_str().unwrap(),
+            files.to_str().unwrap(),
+            playback_tx,
+            storage_tx,
+        );
+        restored.set_account(Some(7));
+        assert!(restored.storage.stream_only);
+        restored.state.load_queue(
+            vec![QueueTrack {
+                key,
+                title: "Song".into(),
+                artist: "Artist".into(),
+                filename: "song.mp3".into(),
+                duration_seconds: None,
+                cover_data: None,
+            }],
+            key,
+        );
+        restored.state.status = PlaybackStatus::Playing;
+        restored.storage_command(&TdJson, StorageCommand::DeleteOffline(key));
+        assert_eq!(restored.state.status, PlaybackStatus::Paused);
+        assert_eq!(restored.state.current_key(), Some(key));
+        assert!(
+            restored
+                .store
+                .as_ref()
+                .unwrap()
+                .saved_path(key)
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn canceled_copy_result_cannot_restore_a_deleted_download() {
+        let root = std::env::temp_dir().join(format!(
+            "tunestash-stale-copy-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("files/tdlib/files")).unwrap();
+        let db = root.join("files/sources.sqlite");
+        SourceStore::open(&db).unwrap();
+        let (playback_tx, _) = watch::channel(PlaybackSnapshot::default());
+        let (storage_tx, _) = watch::channel(StorageSnapshot::default());
+        let mut engine = PlaybackEngine::new(
+            db.to_str().unwrap(),
+            root.join("files/tdlib/files").to_str().unwrap(),
+            playback_tx,
+            storage_tx,
+        );
+        let key = TrackKey {
+            account_id: 1,
+            chat_id: 2,
+            message_id: 3,
+        };
+        engine.set_account(Some(1));
+        engine.invalidate_copy(key);
+        let stale = engine.epochs[&key];
+        engine
+            .store
+            .as_ref()
+            .unwrap()
+            .mark_download(key, "queued", None)
+            .unwrap();
+        engine.invalidate_copy(key);
+        let copied = root.join("files/tdlib/offline/1/stale.audio");
+        std::fs::create_dir_all(copied.parent().unwrap()).unwrap();
+        std::fs::write(&copied, b"stale").unwrap();
+        engine
+            .copy_tx
+            .send((key, stale, Ok((copied.clone(), 5))))
+            .unwrap();
+        engine.tick(&TdJson);
+        assert!(!copied.exists());
+        assert!(
+            engine
+                .store
+                .as_ref()
+                .unwrap()
+                .saved_path(key)
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clear_audio_removes_downloads_and_pending_work_without_resetting_setting() {
+        let root = std::env::temp_dir().join(format!(
+            "tunestash-clear-audio-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let files = root.join("files/tdlib/files");
+        let offline = root.join("files/tdlib/offline/1");
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::create_dir_all(&offline).unwrap();
+        let db = root.join("files/sources.sqlite");
+        SourceStore::open(&db).unwrap();
+        let key = TrackKey {
+            account_id: 1,
+            chat_id: 2,
+            message_id: 3,
+        };
+        let pending = TrackKey {
+            message_id: 4,
+            ..key
+        };
+        let saved = offline.join("3.audio");
+        std::fs::write(&saved, b"audio").unwrap();
+        let (playback_tx, _) = watch::channel(PlaybackSnapshot::default());
+        let (storage_tx, _) = watch::channel(StorageSnapshot::default());
+        let mut engine = PlaybackEngine::new(
+            db.to_str().unwrap(),
+            files.to_str().unwrap(),
+            playback_tx,
+            storage_tx,
+        );
+        engine.set_account(Some(1));
+        let store = engine.store.as_ref().unwrap();
+        store.save_file(key, &saved, 5).unwrap();
+        store.mark_download(pending, "queued", None).unwrap();
+        store.set_stream_only(1, true).unwrap();
+        engine.storage_command(&TdJson, StorageCommand::ClearAudio);
+        assert!(!saved.exists());
+        assert!(
+            engine
+                .store
+                .as_ref()
+                .unwrap()
+                .saved_path(key)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            engine
+                .store
+                .as_ref()
+                .unwrap()
+                .pending_downloads(1)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(engine.store.as_ref().unwrap().stream_only(1).unwrap());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

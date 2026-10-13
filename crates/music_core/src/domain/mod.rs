@@ -418,6 +418,38 @@ pub enum PlaybackCommand {
     DownloadTrack(TrackKey),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredAudio {
+    pub key: TrackKey,
+    pub title: String,
+    pub artist: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StorageSnapshot {
+    pub account_id: Option<i64>,
+    pub app_bytes: u64,
+    pub download_bytes: u64,
+    pub download_count: u64,
+    pub cache_bytes: u64,
+    pub other_bytes: u64,
+    pub stream_only: bool,
+    pub downloads: Vec<StoredAudio>,
+    pub has_more: bool,
+    pub busy: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StorageCommand {
+    Refresh,
+    LoadMore,
+    SetStreamOnly(bool),
+    DeleteOffline(TrackKey),
+    ClearAudio,
+}
+
 #[cfg(test)]
 mod playback_tests {
     use super::*;

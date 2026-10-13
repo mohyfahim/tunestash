@@ -6,7 +6,7 @@ const NOTE: Asset = asset!("/assets/music-note.svg");
 #[component]
 pub fn HomeView(
     snapshot: LibrarySnapshot,
-    on_open_sources: EventHandler<()>,
+    on_open_settings: EventHandler<()>,
     on_see_all: EventHandler<()>,
 ) -> Element {
     rsx! {
@@ -16,9 +16,9 @@ pub fn HomeView(
                 button {
                     class: "home-settings",
                     r#type: "button",
-                    aria_label: "Music sources",
-                    title: "Music sources",
-                    onclick: move |_| on_open_sources.call(()),
+                    aria_label: "Settings",
+                    title: "Settings",
+                    onclick: move |_| on_open_settings.call(()),
                     svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round",
                         path { d: "M10 3h4l.6 2.3a7.8 7.8 0 0 1 1.7 1l2.3-.7 2 3.5-1.7 1.7a8.2 8.2 0 0 1 0 2l1.7 1.7-2 3.5-2.3-.7a7.8 7.8 0 0 1-1.7 1L14 21h-4l-.6-2.3a7.8 7.8 0 0 1-1.7-1l-2.3.7-2-3.5 1.7-1.7a8.2 8.2 0 0 1 0-2L3.4 9.5l2-3.5 2.3.7a7.8 7.8 0 0 1 1.7-1L10 3Z" }
                         circle { cx: "12", cy: "12", r: "2.5" }

@@ -1,10 +1,12 @@
 use crate::runtime::AuthService;
 use crate::ui::home::HomeView;
 use crate::ui::player::{MiniPlayer, PlayerView};
+use crate::ui::settings::SettingsView;
+use crate::ui::storage::StorageView;
 use dioxus::prelude::*;
 use music_core::domain::{
-    LibraryCommand, LibrarySnapshot, LibrarySort, PlaybackCommand, PlaybackSnapshot, TrackKey,
-    TrackSummary,
+    LibraryCommand, LibrarySnapshot, LibrarySort, PlaybackCommand, PlaybackSnapshot,
+    StorageCommand, StorageSnapshot, TrackKey, TrackSummary,
 };
 
 const NOTE: Asset = asset!("/assets/music-note.svg");
@@ -16,8 +18,20 @@ enum Tab {
     Library,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Utility {
+    None,
+    Settings,
+    Storage,
+}
+
 #[component]
-fn TrackRow(track: TrackSummary, account_id: i64, on_play: EventHandler<TrackKey>) -> Element {
+fn TrackRow(
+    track: TrackSummary,
+    account_id: i64,
+    stream_only: bool,
+    on_play: EventHandler<TrackKey>,
+) -> Element {
     let cover = track
         .cover_data
         .as_ref()
@@ -35,7 +49,8 @@ fn TrackRow(track: TrackSummary, account_id: i64, on_play: EventHandler<TrackKey
                     span { dir: "auto", "{track.artist} · {track.source_name}" }
                 }
             }
-            button { class: "library-row-action", r#type: "button", aria_label: "Download track",
+            button { class: "library-row-action", r#type: "button", disabled: stream_only,
+                aria_label: if stream_only { "Download unavailable while Stream only is on" } else { "Download track" },
                 onclick: { let key = TrackKey { account_id, chat_id: track.chat_id, message_id: track.message_id }; move |_| { if let Ok(service) = AuthService::global() { let _ = service.submit_playback(PlaybackCommand::DownloadTrack(key)); } } },
                 svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round",
                     path { d: "M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3" }
@@ -56,16 +71,34 @@ fn TrackRow(track: TrackSummary, account_id: i64, on_play: EventHandler<TrackKey
 pub fn LibraryView(
     snapshot: LibrarySnapshot,
     playback: PlaybackSnapshot,
+    storage: StorageSnapshot,
+    initial_settings: bool,
     on_open_sources: EventHandler<()>,
 ) -> Element {
     let mut tab = use_signal(|| Tab::Home);
     let mut show_player = use_signal(|| false);
+    let mut utility = use_signal(|| {
+        if initial_settings {
+            Utility::Settings
+        } else {
+            Utility::None
+        }
+    });
     let is_library = *tab.read() == Tab::Library;
     let current_sort = snapshot.sort;
     rsx! {
         div { class: "music-shell",
             if *show_player.read() && playback.current().is_some() {
-                PlayerView { snapshot: playback.clone(), on_close: move |_| show_player.set(false) }
+                PlayerView { snapshot: playback.clone(), stream_only: storage.stream_only, on_close: move |_| show_player.set(false) }
+            } else if *utility.read() == Utility::Settings {
+                SettingsView { on_back: move |_| { utility.set(Utility::None); tab.set(Tab::Home); },
+                    on_sources: move |_| on_open_sources.call(()),
+                    on_storage: move |_| {
+                        if let Ok(service) = AuthService::global() { let _ = service.submit_storage(StorageCommand::Refresh); }
+                        utility.set(Utility::Storage);
+                    } }
+            } else if *utility.read() == Utility::Storage {
+                StorageView { snapshot: storage.clone(), on_back: move |_| utility.set(Utility::Settings) }
             } else if is_library {
                 main { class: "library-screen",
                     header { class: "library-header",
@@ -144,7 +177,7 @@ pub fn LibraryView(
                                 } else {
                                     ul { class: "library-list",
                                         for track in snapshot.tracks.iter().cloned() {
-                                            TrackRow { track, account_id: snapshot.account_id.unwrap_or_default(), on_play: move |key| {
+                                            TrackRow { track, account_id: snapshot.account_id.unwrap_or_default(), stream_only: storage.stream_only, on_play: move |key| {
                                                 if let Ok(service) = AuthService::global() {
                                                     let _ = service.submit_playback(PlaybackCommand::PlayLibrary { key, sort: current_sort });
                                                     show_player.set(true);
@@ -180,7 +213,7 @@ pub fn LibraryView(
             } else if *tab.read() == Tab::Home {
                 HomeView {
                     snapshot: snapshot.clone(),
-                    on_open_sources: move |_| on_open_sources.call(()),
+                    on_open_settings: move |_| utility.set(Utility::Settings),
                     on_see_all: move |_| {
                         if let Ok(service) = AuthService::global() {
                             let _ = service.submit_library(LibraryCommand::SetSort(LibrarySort::Recent));
@@ -194,7 +227,7 @@ pub fn LibraryView(
             if !*show_player.read() && playback.current().is_some() {
                 MiniPlayer { snapshot: playback.clone(), on_open: move |_| show_player.set(true) }
             }
-            if !*show_player.read() { nav { class: "music-bottom-nav", aria_label: "Main navigation",
+            if !*show_player.read() && *utility.read() == Utility::None { nav { class: "music-bottom-nav", aria_label: "Main navigation",
                 button { class: if *tab.read() == Tab::Home { "nav-tab active" } else { "nav-tab" }, r#type: "button", onclick: move |_| tab.set(Tab::Home),
                     svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round", path { d: "m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1V10Z" } }
                     span { "Home" }

@@ -1,7 +1,7 @@
 use crate::runtime::AuthService;
 use dioxus::prelude::*;
 use music_core::domain::{
-    DownloadStatus, PlaybackCommand, PlaybackSnapshot, PlaybackStatus, RepeatMode,
+    DownloadStatus, PlaybackCommand, PlaybackSnapshot, PlaybackStatus, RepeatMode, StorageCommand,
 };
 
 const NOTE: Asset = asset!("/assets/music-note.svg");
@@ -24,8 +24,14 @@ enum Panel {
 }
 
 #[component]
-pub fn PlayerView(snapshot: PlaybackSnapshot, on_close: EventHandler<()>) -> Element {
+pub fn PlayerView(
+    snapshot: PlaybackSnapshot,
+    stream_only: bool,
+    on_close: EventHandler<()>,
+) -> Element {
     let mut panel = use_signal(|| Panel::Song);
+    let mut saved_actions = use_signal(|| None::<(music_core::domain::TrackKey, String)>);
+    let mut confirm_remove = use_signal(|| None::<(music_core::domain::TrackKey, String)>);
     let Some(track) = snapshot.current().cloned() else {
         return rsx! {};
     };
@@ -120,11 +126,13 @@ pub fn PlayerView(snapshot: PlaybackSnapshot, on_close: EventHandler<()>) -> Ele
                     if !status.is_empty() { p { class: "player-status", role: "status", "{status}" } }
                     if let Some(error) = &snapshot.error { p { class: "player-error", role: "alert", "{error}" } }
                     div { class: "player-actions",
-                        button { r#type: "button", onclick: move |_| send(PlaybackCommand::Download),
+                        button { r#type: "button", disabled: stream_only && snapshot.download != DownloadStatus::Saved,
+                            aria_label: if snapshot.download == DownloadStatus::Saved { "Saved song actions" } else if stream_only { "Download unavailable while Stream only is on" } else { "Download song" },
+                            onclick: { let key = track.key; let title = track.title.clone(); move |_| if snapshot.download == DownloadStatus::Saved { saved_actions.set(Some((key, title.clone()))); } else { send(PlaybackCommand::Download); } },
                             svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round",
                                 path { d: if snapshot.download == DownloadStatus::Saved { "m5 12 4 4 10-10" } else { "M12 3v12m0 0 4-4m-4 4-4-4M4 18v3h16v-3" } }
                             }
-                            span { match snapshot.download { DownloadStatus::Remote => "Download", DownloadStatus::Downloading => "Saving…", DownloadStatus::Saved => "Saved", DownloadStatus::Failed => "Retry save" } }
+                            span { if stream_only && snapshot.download != DownloadStatus::Saved { "Stream only" } else { match snapshot.download { DownloadStatus::Remote => "Download", DownloadStatus::Downloading => "Saving…", DownloadStatus::Saved => "Saved", DownloadStatus::Failed => "Retry save" } } }
                         }
                         button { r#type: "button", disabled: true, aria_label: "Add to playlist unavailable", svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", path { d: "M3 6h13M3 11h13M3 16h9m5-2v7m-3.5-3.5h7" } } span { "Add to Playlist" } }
                         button { r#type: "button", disabled: true, aria_label: "Go to album unavailable", svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", circle { cx: "12", cy: "12", r: "9" } circle { cx: "12", cy: "12", r: "2" } } span { "Go to Album" } }
@@ -149,6 +157,34 @@ pub fn PlayerView(snapshot: PlaybackSnapshot, on_close: EventHandler<()>) -> Ele
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+        if let Some((key, title)) = saved_actions.read().clone() {
+            div { class: "storage-dialog-backdrop", role: "presentation",
+                div { class: "storage-dialog player-saved-sheet", role: "dialog", aria_modal: "true", aria_labelledby: "saved-actions-title",
+                    h2 { id: "saved-actions-title", "Saved for offline" }
+                    p { "This song is stored on this device." }
+                    button { class: "player-remove-action", r#type: "button", onclick: move |_| { saved_actions.set(None); confirm_remove.set(Some((key, title.clone()))); },
+                        svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round", path { d: "M3 6h18m-2 0-1 15H6L5 6m3 0V4h8v2m-6 4v7m4-7v7" } }
+                        "Remove download"
+                    }
+                    button { class: "player-sheet-cancel", r#type: "button", onclick: move |_| saved_actions.set(None), "Cancel" }
+                }
+            }
+        }
+        if let Some((key, title)) = confirm_remove.read().clone() {
+            div { class: "storage-dialog-backdrop", role: "presentation",
+                div { class: "storage-dialog", role: "alertdialog", aria_modal: "true", aria_labelledby: "player-remove-title", aria_describedby: "player-remove-description",
+                    h2 { id: "player-remove-title", "Remove saved copy?" }
+                    p { id: "player-remove-description", dir: "auto", "{title} will need Telegram to play again. Playback will stop if this song is selected. Its library entry and message will stay." }
+                    div { class: "storage-dialog-actions",
+                        button { r#type: "button", onclick: move |_| confirm_remove.set(None), "Cancel" }
+                        button { class: "danger", r#type: "button", onclick: move |_| {
+                            confirm_remove.set(None);
+                            if let Ok(service) = AuthService::global() { let _ = service.submit_storage(StorageCommand::DeleteOffline(key)); }
+                        }, "Remove download" }
                     }
                 }
             }

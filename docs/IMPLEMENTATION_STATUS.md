@@ -35,7 +35,7 @@ Updated: 2026-10-13
 - The Sources heading has compact Resync and Next controls. Next is available
   after a complete scan, including one with failed chat checks or no selected
   sources. It saves an account-scoped setup marker and opens the music shell on
-  Home. Later launches open Home; its gear opens Sources temporarily.
+  Home. Later launches open Home; its gear opens Settings.
   Logout removes the marker, and a failed save keeps Sources visible.
 - A Change account confirmation starts TDLib logout, clears the account's
   source choices after TDLib closes, and creates a fresh TDLib client for the
@@ -149,14 +149,14 @@ tapping an active letter restored the full list. The rail stayed visible while
 scrolling, and its lower letters were reachable by scrolling the rail. A cold
 relaunch restored the 383-track catalog. A live Reindex was not exercised.
 No private account database was inspected.
-A dedicated Settings screen remains future work.
+Settings and storage management were added in the later increment below.
 
 ## Home increment
 
 - Home is the default tab after source setup. Its dark layout follows
   `concept/home.png`: recent cover carousel, listening and playlist sections,
-  and the three-tab bottom navigation. The gear opens the existing Music
-  Sources list; Next returns to Home.
+  and the three-tab bottom navigation. The gear now opens Settings, which
+  links to Music Sources and Storage management.
 - Recently Added shows up to 12 real tracks from enabled sources, ordered by
   Telegram message date with stable chat/message tie breaks. It uses TDLib's
   embedded cover minithumbnail when available and the TuneStash mark otherwise.
@@ -195,8 +195,9 @@ visually checked on this device.
   without an Activity. iOS reports playback unavailable.
 - TDLib resolves each track by account, chat, and message ID. Media3 reads
   verified available ranges through a native data source while TDLib continues
-  the full download. Completed files are size-checked, copied atomically to
-  app-private storage, and used for offline replay. Media3's decoded embedded
+  the full download. Explicitly requested offline files are size-checked,
+  copied atomically to app-private storage, and used for offline replay.
+  Media3's decoded embedded
   cover art replaces a small Telegram thumbnail when available. The database keeps
   favorites, playback state, incomplete download records, and saved-file
   records. Interrupted transfers are retried at runtime startup. Missing
@@ -239,3 +240,40 @@ a Tokio watch channel. SQLite writes happen on that thread, so UI rendering
 only reads immutable snapshots. Account and chat IDs stay as `i64` throughout
 the Rust path. TDLib responses are correlated with request IDs; a bounded job
 queue checks chats without starting one request per row at once.
+
+## Settings and storage increment
+
+- The Home gear opens Settings with Music Sources and Storage management.
+  The latter measures app-private data in the background and shows offline
+  downloads, Telegram file cache, and other app data. Saved songs are listed
+  by size, 50 at a time, with individual removal and a confirmed bulk clear.
+  Sources returns to Settings after setup rather than reopening onboarding.
+- Stream only is stored per account and blocks explicit save commands from the
+  player and Library. Existing offline files remain playable. Ordinary range
+  playback no longer creates a pinned copy; TDLib still uses temporary disk
+  bytes, which are requested for cleanup when playback ends or changes and on
+  startup. The v6 migration marks ambiguous pre-upgrade pending transfers as
+  failed so they cannot silently become offline files.
+- Per-song removal stops that song if selected, deletes its pinned file, and
+  retains library and queue metadata. Bulk clear stops playback, cancels
+  pending work, removes offline files, and requests TDLib cache optimization.
+  Generation-tagged copies cannot restore a canceled download. Filesystem and
+  TDLib errors remain visible, and figures are rescanned after operations.
+- Host tests cover ordinary playback versus explicit saving, Stream only
+  persistence and blocking, late copy rejection, bulk clear, sorted storage
+  rows, account isolation, and failed file deletion. Workspace tests and
+  Clippy, plus an Android ARM64 Rust check, pass. The tracked APK build remains
+  blocked by the missing Android SDK 35 platform JAR. A diagnostic APK using
+  SDK 34 and skipping Media3 AAR metadata validation built and installed.
+- On Samsung SM-A256E (Android 14), Settings, Storage management, both delete
+  confirmations, the main-player Saved action sheet, and return navigation
+  from Sources were reviewed. Storage showed 86.5 MB total,
+  including five offline songs (27.3 MB). No saved songs or cache were deleted
+  during device review, so physical-device deletion and cache cleanup remain
+  unverified. Layouts fit the normal 1080 px width and temporary 960 px width;
+  the original width was restored.
+
+This increment keeps storage policy on the Rust service thread and publishes
+immutable snapshots to Dioxus. Filesystem measurement uses a separate worker;
+the playback worker coordinates TDLib file IDs, pending transfers, and
+generation-tagged file copies before changing offline state.
