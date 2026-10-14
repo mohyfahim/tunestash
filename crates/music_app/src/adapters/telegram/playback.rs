@@ -1324,7 +1324,8 @@ mod tests {
                 .is_none()
         );
         let (library_tx, _) = watch::channel(LibrarySnapshot::default());
-        let library = LibraryEngine::new(db.to_str().unwrap(), library_tx);
+        let (search_tx, _) = watch::channel(music_core::domain::SearchSnapshot::default());
+        let library = LibraryEngine::new(db.to_str().unwrap(), library_tx, search_tx);
         engine.command(&TdJson, &library, PlaybackCommand::DownloadTrack(key));
         for _ in 0..100 {
             engine.tick(&TdJson);

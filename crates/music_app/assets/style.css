@@ -297,6 +297,65 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--lime); outl
 .library-empty p { max-width: 31ch; margin: 0; color: var(--library-secondary); font-size: 13px; line-height: 1.45; }
 .library-empty-filter { flex: 1; min-width: 0; min-height: 45dvh; padding-inline: 8px; }
 .music-black-page { flex: 1; min-height: 0; background: #000; }
+.search-screen {
+  --search-bg: var(--library-bg);
+  --search-ink: var(--library-ink);
+  --search-muted: var(--library-secondary);
+  --search-field: var(--library-soft);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: radial-gradient(ellipse 80% 32% at 50% 0%, #202924, var(--search-bg) 84%);
+  color: var(--search-ink);
+  color-scheme: dark;
+  scrollbar-color: #59625a transparent;
+}
+.search-content { width: min(100%, 680px); margin: 0 auto; padding: max(28px, env(safe-area-inset-top)) 24px 32px; }
+.search-header { display: flex; align-items: center; min-height: 52px; }
+.search-header h1 { margin: 0; font-size: 29px; font-weight: 800; letter-spacing: -.035em; line-height: 1.1; }
+.search-form { display: flex; align-items: center; gap: 10px; height: 54px; margin-top: 14px; padding: 0 14px; border-radius: 16px; background: var(--search-field); }
+.search-form:focus-within { outline: 2px solid var(--library-lime); outline-offset: 2px; }
+.search-field-icon { flex: none; width: 21px; height: 21px; color: var(--search-ink); }
+.search-form input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; outline: 0; background: transparent; color: var(--search-ink); caret-color: var(--library-lime); font-size: 14px; }
+.search-form input::-webkit-search-cancel-button { display: none; }
+.search-form input::placeholder { color: var(--search-muted); opacity: 1; }
+.search-form input:focus-visible { outline: 0; }
+.search-field-clear { display: grid; flex: none; place-items: center; width: 44px; height: 44px; margin-right: -9px; padding: 0; border: 0; border-radius: 12px; background: transparent; color: var(--search-muted); }
+.search-field-clear svg { width: 17px; height: 17px; }
+.search-section { margin-top: 30px; }
+.search-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; margin-bottom: 6px; }
+.search-section-heading h2 { margin: 0; font-size: 16px; font-weight: 730; letter-spacing: -.02em; line-height: 1.2; }
+.search-clear-history { min-width: 44px; min-height: 44px; padding: 0 8px; border: 0; background: none; color: var(--library-lime); font-size: 13px; font-weight: 650; }
+.search-history-list, .search-track-list { margin: 0; padding: 0; list-style: none; }
+.search-history-list button { display: flex; align-items: center; gap: 16px; width: 100%; min-height: 48px; padding: 3px 2px; border: 0; background: transparent; color: var(--search-ink); text-align: left; }
+.search-history-list svg { flex: none; width: 20px; height: 20px; color: var(--search-muted); }
+.search-history-list span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.search-recent-tracks { margin-top: 31px; }
+.search-result-count { flex: none; color: var(--search-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.search-track-open { display: flex; align-items: center; gap: 11px; width: 100%; min-height: 63px; padding: 5px 2px; border: 0; border-radius: 10px; background: transparent; color: var(--search-ink); text-align: left; }
+.search-track-open:active, .search-history-list button:active { background: rgba(255,254,250,.07); }
+.search-art { display: block; flex: none; width: 50px; height: 50px; overflow: hidden; border-radius: 9px; background: #d7ff3f; }
+.search-art img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.search-art .search-art-fallback { padding: 11px; object-fit: contain; }
+.search-track-copy { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
+.search-track-copy strong, .search-track-copy small, .search-track-copy em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-track-copy strong { font-size: 14px; font-weight: 670; line-height: 1.25; }
+.search-track-copy small, .search-track-copy em { color: var(--search-muted); font-size: 12px; font-style: normal; line-height: 1.2; }
+.search-track-copy em { font-size: 11px; }
+.search-message, .search-indexing { margin: 16px 2px 0; color: var(--search-muted); font-size: 13px; line-height: 1.4; }
+.search-empty-results, .search-empty-library { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 230px; padding: 26px 12px; text-align: center; }
+.search-empty-results img, .search-empty-library img { width: 50px; height: 50px; padding: 11px; border-radius: 12px; background: #d7ff3f; }
+.search-empty-results h3, .search-empty-library h3 { margin: 16px 0 5px; font-size: 17px; line-height: 1.2; }
+.search-empty-results p, .search-empty-library p { max-width: 35ch; margin: 0; color: var(--search-muted); font-size: 13px; line-height: 1.45; }
+.search-more { display: block; min-height: 44px; margin: 17px auto 0; padding: 8px 18px; border: 0; border-radius: 999px; background: var(--search-field); color: var(--search-ink); font-size: 12px; font-weight: 700; }
+.search-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; padding: 12px 14px; border-radius: 12px; background: #3b2322; color: #ffb4ac; font-size: 12px; line-height: 1.4; }
+.search-error button { flex: none; min-height: 44px; padding: 0 3px; border: 0; background: none; color: inherit; font-weight: 700; }
+.search-screen button:focus-visible { outline: 2px solid var(--library-lime); outline-offset: 2px; }
+@media (max-width: 380px) {
+  .search-content { padding-inline: 18px; }
+  .search-track-open { gap: 8px; }
+}
 .music-bottom-nav { display: grid; flex: none; grid-template-columns: repeat(3, 1fr); align-items: start; width: 100%; min-height: calc(64px + env(safe-area-inset-bottom)); padding: 6px max(13px, calc((100vw - 680px) / 2)) max(4px, env(safe-area-inset-bottom)); background: var(--library-surface); border-top: 1px solid rgba(255,254,250,.08); }
 .nav-tab { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 51px; padding: 2px 8px; border: 0; background: none; color: var(--library-secondary); font-size: 10px; line-height: 1.1; }
 .nav-tab svg { width: 23px; height: 23px; }

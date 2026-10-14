@@ -8,7 +8,8 @@ use music_core::domain::TrackKey;
 use music_core::{
     domain::{
         AuthCommand, AuthSnapshot, LibraryCommand, LibrarySnapshot, PlaybackCommand,
-        PlaybackSnapshot, SourceCommand, SourceSnapshot, StorageCommand, StorageSnapshot,
+        PlaybackSnapshot, SearchCommand, SearchSnapshot, SourceCommand, SourceSnapshot,
+        StorageCommand, StorageSnapshot,
     },
     ports::TelegramAuth,
 };
@@ -29,6 +30,7 @@ pub enum DriverCommand {
     Auth(AuthCommand),
     Source(SourceCommand),
     Library(LibraryCommand),
+    Search(SearchCommand),
     Playback(PlaybackCommand),
     Storage(StorageCommand),
     #[cfg(target_os = "android")]
@@ -47,6 +49,7 @@ pub struct AuthService {
     snapshots: watch::Receiver<AuthSnapshot>,
     sources: watch::Receiver<SourceSnapshot>,
     library: watch::Receiver<LibrarySnapshot>,
+    search: watch::Receiver<SearchSnapshot>,
     playback: watch::Receiver<PlaybackSnapshot>,
     storage: watch::Receiver<StorageSnapshot>,
 }
@@ -89,6 +92,7 @@ impl AuthService {
         let (snapshot_tx, snapshot_rx) = watch::channel(AuthSnapshot::default());
         let (source_tx, source_rx) = watch::channel(SourceSnapshot::default());
         let (library_tx, library_rx) = watch::channel(LibrarySnapshot::default());
+        let (search_tx, search_rx) = watch::channel(SearchSnapshot::default());
         let (playback_tx, playback_rx) = watch::channel(PlaybackSnapshot::default());
         let (storage_tx, storage_rx) = watch::channel(StorageSnapshot::default());
         std::thread::Builder::new()
@@ -100,6 +104,7 @@ impl AuthService {
                     snapshot_tx,
                     source_tx,
                     library_tx,
+                    search_tx,
                     playback_tx,
                     storage_tx,
                 )
@@ -110,6 +115,7 @@ impl AuthService {
             snapshots: snapshot_rx,
             sources: source_rx,
             library: library_rx,
+            search: search_rx,
             playback: playback_rx,
             storage: storage_rx,
         })
@@ -144,6 +150,20 @@ impl AuthService {
         self.commands
             .try_send(DriverCommand::Library(command))
             .map_err(|_| "Telegram is busy. Wait a moment and retry.".into())
+    }
+
+    pub fn search_snapshot(&self) -> SearchSnapshot {
+        self.search.borrow().clone()
+    }
+
+    pub fn subscribe_search(&self) -> watch::Receiver<SearchSnapshot> {
+        self.search.clone()
+    }
+
+    pub fn submit_search(&self, command: SearchCommand) -> Result<(), String> {
+        self.commands
+            .try_send(DriverCommand::Search(command))
+            .map_err(|_| "Search is busy. Try again.".into())
     }
 
     pub fn playback_snapshot(&self) -> PlaybackSnapshot {

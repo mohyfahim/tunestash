@@ -3,6 +3,7 @@
 mod home;
 mod library;
 mod player;
+mod search;
 mod settings;
 mod sources;
 mod storage;
@@ -71,6 +72,11 @@ pub fn App() -> Element {
             .map(|service| service.library_snapshot())
             .unwrap_or_default()
     });
+    let mut search_snapshot = use_signal(|| {
+        AuthService::global()
+            .map(|service| service.search_snapshot())
+            .unwrap_or_default()
+    });
     let mut playback_snapshot = use_signal(|| {
         AuthService::global()
             .map(|service| service.playback_snapshot())
@@ -106,6 +112,16 @@ pub fn App() -> Element {
         let mut changes = service.subscribe_library();
         while changes.changed().await.is_ok() {
             library_snapshot.set(changes.borrow_and_update().clone());
+        }
+    });
+
+    use_future(move || async move {
+        let Ok(service) = AuthService::global() else {
+            return;
+        };
+        let mut changes = service.subscribe_search();
+        while changes.changed().await.is_ok() {
+            search_snapshot.set(changes.borrow_and_update().clone());
         }
     });
 
@@ -253,6 +269,7 @@ pub fn App() -> Element {
             if show_music_shell(user_id, &source_state, *temporary_sources.read()) {
                 library::LibraryView {
                     snapshot: library_snapshot.read().clone(),
+                    search: search_snapshot.read().clone(),
                     playback: playback_snapshot.read().clone(),
                     storage: storage_snapshot.read().clone(),
                     initial_settings: *return_settings.read(),

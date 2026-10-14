@@ -477,6 +477,7 @@ pub fn run(
     updates: watch::Sender<AuthSnapshot>,
     source_updates: watch::Sender<SourceSnapshot>,
     library_updates: watch::Sender<LibrarySnapshot>,
+    search_updates: watch::Sender<music_core::domain::SearchSnapshot>,
     playback_updates: watch::Sender<music_core::domain::PlaybackSnapshot>,
     storage_updates: watch::Sender<music_core::domain::StorageSnapshot>,
 ) {
@@ -488,7 +489,7 @@ pub fn run(
         }
     };
     let sources = sources::SourceEngine::new(&config.source_db, source_updates);
-    let library = library::LibraryEngine::new(&config.source_db, library_updates);
+    let library = library::LibraryEngine::new(&config.source_db, library_updates, search_updates);
     let playback = playback::PlaybackEngine::new(
         &config.source_db,
         &config.files_dir,
@@ -524,6 +525,7 @@ pub fn run(
                     driver.sources.handle_command(&driver.td, command)
                 }
                 DriverCommand::Library(command) => driver.library.command(command),
+                DriverCommand::Search(command) => driver.library.search_command(command),
                 DriverCommand::Playback(command) => {
                     driver
                         .playback

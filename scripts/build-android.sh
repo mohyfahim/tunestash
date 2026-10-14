@@ -36,7 +36,7 @@ fi
 
 ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 if [[ -z "$ANDROID_HOME" || ! -f "$ANDROID_HOME/platforms/android-34/android.jar" || ! -f "$ANDROID_HOME/platforms/android-35/android.jar" ]]; then
-  echo "Set ANDROID_HOME to an Android SDK with platforms 34 and 35 installed." >&2
+  echo "Set ANDROID_HOME: $ANDROID_HOME to an Android SDK with platforms 34 and 35 installed." >&2
   exit 1
 fi
 

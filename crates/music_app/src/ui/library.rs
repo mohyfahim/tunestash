@@ -1,12 +1,13 @@
 use crate::runtime::AuthService;
 use crate::ui::home::HomeView;
 use crate::ui::player::{MiniPlayer, PlayerView};
+use crate::ui::search::SearchView;
 use crate::ui::settings::SettingsView;
 use crate::ui::storage::StorageView;
 use dioxus::prelude::*;
 use music_core::domain::{
     LibraryCommand, LibrarySnapshot, LibrarySort, PlaybackCommand, PlaybackSnapshot,
-    StorageCommand, StorageSnapshot, TrackKey, TrackSummary,
+    SearchSnapshot, StorageCommand, StorageSnapshot, TrackKey, TrackSummary,
 };
 
 const NOTE: Asset = asset!("/assets/music-note.svg");
@@ -70,6 +71,7 @@ fn TrackRow(
 #[component]
 pub fn LibraryView(
     snapshot: LibrarySnapshot,
+    search: SearchSnapshot,
     playback: PlaybackSnapshot,
     storage: StorageSnapshot,
     initial_settings: bool,
@@ -121,10 +123,10 @@ pub fn LibraryView(
                     }
                     div { class: "library-pills", aria_label: "Library categories",
                         span { class: "library-pill selected", "Tracks" }
-                        button { class: "library-pill", r#type: "button", disabled: true, "Playlists" }
                         button { class: "library-pill", r#type: "button", disabled: true, "Favorites" }
-                        button { class: "library-pill", r#type: "button", disabled: true, "Artists" }
-                        button { class: "library-pill", r#type: "button", disabled: true, "Albums" }
+                        // button { class: "library-pill", r#type: "button", disabled: true, "Playlists" }
+                        // button { class: "library-pill", r#type: "button", disabled: true, "Artists" }
+                        // button { class: "library-pill", r#type: "button", disabled: true, "Albums" }
                     }
                     div { class: "library-toolbar",
                         span { class: "library-count",
@@ -222,7 +224,12 @@ pub fn LibraryView(
                     },
                 }
             } else {
-                main { class: "music-black-page", aria_label: "Search placeholder" }
+                SearchView { snapshot: search, on_play: move |key| {
+                    if let Ok(service) = AuthService::global() {
+                        let _ = service.submit_playback(PlaybackCommand::PlayLibrary { key, sort: LibrarySort::Title });
+                        show_player.set(true);
+                    }
+                } }
             }
             if !*show_player.read() && playback.current().is_some() {
                 MiniPlayer { snapshot: playback.clone(), on_open: move |_| show_player.set(true) }

@@ -4,6 +4,7 @@
 pub mod library;
 pub mod playback;
 
+use music_core::application::normalize_search;
 use music_core::domain::{MusicCheck, SourceChat, SourceKind};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
@@ -85,6 +86,80 @@ fn migrate_storage(connection: &Connection) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+fn migrate_search(connection: &Connection) -> Result<(), String> {
+    let columns: Vec<String> = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(indexed_tracks)")
+            .map_err(|error| error.to_string())?;
+        statement
+            .query_map([], |row| row.get(1))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    connection
+        .execute_batch("BEGIN IMMEDIATE;")
+        .map_err(|error| error.to_string())?;
+    for column in ["search_title", "search_artist", "search_filename"] {
+        if !columns.iter().any(|existing| existing == column) {
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE indexed_tracks ADD COLUMN {column} TEXT NOT NULL DEFAULT '';"
+                ))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS recent_searches (
+           account_id INTEGER NOT NULL,
+           normalized_query TEXT NOT NULL,
+           display_query TEXT NOT NULL,
+           used_order INTEGER NOT NULL,
+           PRIMARY KEY(account_id, normalized_query)
+         );",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = {
+        let mut statement = connection.prepare(
+            "SELECT account_id, chat_id, message_id, title, artist, filename FROM indexed_tracks"
+        ).map_err(|error| error.to_string())?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    for (account, chat, message, title, artist, filename) in rows {
+        connection
+            .execute(
+                "UPDATE indexed_tracks SET search_title=?4, search_artist=?5, search_filename=?6
+             WHERE account_id=?1 AND chat_id=?2 AND message_id=?3",
+                params![
+                    account,
+                    chat,
+                    message,
+                    normalize_search(&title),
+                    normalize_search(&artist),
+                    normalize_search(&filename)
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    connection
+        .execute_batch("PRAGMA user_version = 7; COMMIT;")
+        .map_err(|error| error.to_string())
+}
+
 pub struct SourceStore {
     connection: Connection,
 }
@@ -95,7 +170,7 @@ impl SourceStore {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version > 6 {
+        if version > 7 {
             return Err("Source database was created by a newer app version.".into());
         }
         connection
@@ -193,6 +268,9 @@ impl SourceStore {
             .map_err(|error| error.to_string())?;
         if version < 6 {
             self::migrate_storage(&connection)?;
+        }
+        if version < 7 {
+            self::migrate_search(&connection)?;
         }
         Ok(Self { connection })
     }
@@ -414,6 +492,7 @@ impl SourceStore {
             "playback_queue",
             "playback_state",
             "storage_settings",
+            "recent_searches",
         ] {
             transaction
                 .execute(
@@ -603,8 +682,56 @@ mod tests {
         let version: i64 = upgraded
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         drop(upgraded);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn v6_search_upgrade_backfills_existing_tracks() {
+        let path = std::env::temp_dir().join(format!(
+            "tunestash-search-upgrade-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE indexed_tracks (
+               account_id INTEGER NOT NULL, chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
+               media_type TEXT NOT NULL, message_date INTEGER NOT NULL, title TEXT NOT NULL,
+               artist TEXT NOT NULL, filename TEXT NOT NULL, duration_seconds INTEGER,
+               cover_data TEXT, scan_generation INTEGER NOT NULL,
+               PRIMARY KEY(account_id, chat_id, message_id));
+             INSERT INTO indexed_tracks VALUES
+               (7, 9, 11, 'audio', 1, 'كيان', 'Artist', 'test.mp3', NULL, NULL, 1);
+             PRAGMA user_version=6;",
+        )
+        .unwrap();
+        drop(old);
+        let source = SourceStore::open(&path).unwrap();
+        source
+            .set_selected(
+                7,
+                &SourceChat {
+                    chat_id: 9,
+                    title: "Archive".into(),
+                    subtitle: String::new(),
+                    kind: SourceKind::PersonalChannel,
+                    selected: true,
+                    music: MusicCheck::Found,
+                },
+                true,
+            )
+            .unwrap();
+        let library = library::LibraryStore::open(&path).unwrap();
+        let (results, count) = library.search_page(7, "کیان", 50, 0).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(results[0].title, "كيان");
+        let version: i64 = Connection::open(&path)
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 7);
+        std::fs::remove_file(path).unwrap();
     }
 }

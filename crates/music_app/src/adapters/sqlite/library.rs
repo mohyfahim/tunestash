@@ -1,8 +1,11 @@
 //! Metadata catalog and resumable source scans. All calls run on the TDLib
 //! service thread, never during a Dioxus render.
 
-use music_core::domain::{LibrarySort, TrackSummary};
-use rusqlite::{Connection, OptionalExtension, params};
+use music_core::{
+    application::normalize_search,
+    domain::{LibrarySort, TrackSummary},
+};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,13 +131,16 @@ impl LibraryStore {
                 .prepare(
                     "INSERT INTO indexed_tracks
                      (account_id, chat_id, message_id, media_type, message_date, title,
-                      artist, filename, duration_seconds, cover_data, scan_generation)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                      artist, filename, duration_seconds, cover_data, scan_generation,
+                      search_title, search_artist, search_filename)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                      ON CONFLICT(account_id, chat_id, message_id) DO UPDATE SET
                       media_type = excluded.media_type, message_date = excluded.message_date,
                       title = excluded.title, artist = excluded.artist,
                       filename = excluded.filename, duration_seconds = excluded.duration_seconds,
-                      cover_data = excluded.cover_data, scan_generation = excluded.scan_generation",
+                      cover_data = excluded.cover_data, scan_generation = excluded.scan_generation,
+                      search_title = excluded.search_title, search_artist = excluded.search_artist,
+                      search_filename = excluded.search_filename",
                 )
                 .map_err(|e| e.to_string())?;
             for track in tracks {
@@ -150,7 +156,10 @@ impl LibraryStore {
                         track.filename,
                         track.duration_seconds,
                         track.cover_data,
-                        generation
+                        generation,
+                        normalize_search(&track.title),
+                        normalize_search(&track.artist),
+                        normalize_search(&track.filename)
                     ])
                     .map_err(|e| e.to_string())?;
             }
@@ -200,13 +209,16 @@ impl LibraryStore {
             .execute(
                 "INSERT INTO indexed_tracks
              (account_id, chat_id, message_id, media_type, message_date, title, artist,
-              filename, duration_seconds, cover_data, scan_generation)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+              filename, duration_seconds, cover_data, scan_generation,
+              search_title, search_artist, search_filename)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(account_id, chat_id, message_id) DO UPDATE SET
               media_type=excluded.media_type, message_date=excluded.message_date,
               title=excluded.title, artist=excluded.artist, filename=excluded.filename,
               duration_seconds=excluded.duration_seconds, cover_data=excluded.cover_data,
-              scan_generation=excluded.scan_generation",
+              scan_generation=excluded.scan_generation,
+              search_title=excluded.search_title, search_artist=excluded.search_artist,
+              search_filename=excluded.search_filename",
                 params![
                     account,
                     chat,
@@ -218,7 +230,10 @@ impl LibraryStore {
                     track.filename,
                     track.duration_seconds,
                     track.cover_data,
-                    generation
+                    generation,
+                    normalize_search(&track.title),
+                    normalize_search(&track.artist),
+                    normalize_search(&track.filename)
                 ],
             )
             .map(|_| ())
@@ -254,6 +269,134 @@ impl LibraryStore {
         let (_, total) = self.query_page(account, 0, None, sort)?;
         self.query_page(account, total, None, sort)
             .map(|(tracks, _)| tracks)
+    }
+
+    pub fn search_page(
+        &self,
+        account: i64,
+        query: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<TrackSummary>, usize), String> {
+        let normalized = normalize_search(query);
+        let terms: Vec<_> = normalized.split_whitespace().collect();
+        if terms.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        let predicate = std::iter::repeat_n(
+            "(instr(tracks.search_title, ?) > 0 OR instr(tracks.search_artist, ?) > 0 \
+             OR instr(tracks.search_filename, ?) > 0)",
+            terms.len(),
+        )
+        .collect::<Vec<_>>()
+        .join(" AND ");
+        let mut filter_params = vec![Value::Integer(account)];
+        for term in &terms {
+            for _ in 0..3 {
+                filter_params.push(Value::Text((*term).to_string()));
+            }
+        }
+        let from = format!(
+            "FROM indexed_tracks AS tracks JOIN source_choices AS choices
+             ON choices.account_id=tracks.account_id AND choices.chat_id=tracks.chat_id
+             WHERE tracks.account_id=? AND choices.enabled=1 AND {predicate}"
+        );
+        let count: i64 = self
+            .connection
+            .query_row(
+                &format!("SELECT count(*) {from}"),
+                params_from_iter(&filter_params),
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let mut page_params = filter_params;
+        for _ in 0..5 {
+            page_params.push(Value::Text(normalized.clone()));
+        }
+        page_params.push(Value::Integer(limit as i64));
+        page_params.push(Value::Integer(offset as i64));
+        let mut statement = self
+            .connection
+            .prepare(&format!(
+                "SELECT tracks.chat_id, tracks.message_id, tracks.title, tracks.artist,
+                    tracks.filename, choices.display_name, tracks.message_date,
+                    tracks.duration_seconds, tracks.cover_data
+             {from}
+             ORDER BY CASE
+               WHEN tracks.search_title=? THEN 0
+               WHEN substr(tracks.search_title, 1, length(?))=? THEN 1
+               WHEN instr(tracks.search_title, ?)>0 THEN 2
+               WHEN instr(tracks.search_artist, ?)>0 THEN 3
+               ELSE 4 END,
+               tracks.message_date DESC, tracks.chat_id DESC, tracks.message_id DESC
+             LIMIT ? OFFSET ?"
+            ))
+            .map_err(|error| error.to_string())?;
+        let tracks = statement
+            .query_map(params_from_iter(&page_params), |row| {
+                Ok(TrackSummary {
+                    chat_id: row.get(0)?,
+                    message_id: row.get(1)?,
+                    title: row.get(2)?,
+                    artist: row.get(3)?,
+                    filename: row.get(4)?,
+                    source_name: row.get(5)?,
+                    date: row.get(6)?,
+                    duration_seconds: row.get(7)?,
+                    cover_data: row.get(8)?,
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        Ok((tracks, count.max(0) as usize))
+    }
+
+    pub fn recent_queries(&self, account: i64) -> Result<Vec<String>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT display_query FROM recent_searches WHERE account_id=?1
+             ORDER BY used_order DESC LIMIT 8",
+            )
+            .map_err(|error| error.to_string())?;
+        statement
+            .query_map([account], |row| row.get(0))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn save_query(&self, account: i64, query: &str) -> Result<(), String> {
+        let display = query.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized = normalize_search(&display);
+        if normalized.is_empty() {
+            return Ok(());
+        }
+        self.connection.execute(
+            "INSERT INTO recent_searches(account_id, normalized_query, display_query, used_order)
+             VALUES (?1, ?2, ?3,
+               (SELECT COALESCE(MAX(used_order), 0) + 1 FROM recent_searches WHERE account_id=?1))
+             ON CONFLICT(account_id, normalized_query) DO UPDATE SET
+               display_query=excluded.display_query, used_order=excluded.used_order",
+            params![account, normalized, display],
+        ).map_err(|error| error.to_string())?;
+        self.connection
+            .execute(
+                "DELETE FROM recent_searches WHERE account_id=?1 AND normalized_query NOT IN
+               (SELECT normalized_query FROM recent_searches WHERE account_id=?1
+                ORDER BY used_order DESC LIMIT 8)",
+                [account],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn clear_history(&self, account: i64) -> Result<(), String> {
+        self.connection
+            .execute("DELETE FROM recent_searches WHERE account_id=?1", [account])
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     fn query_page(
@@ -493,6 +636,100 @@ mod tests {
         let title = store.all_tracks(1, LibrarySort::Title).unwrap();
         assert_eq!(title.len(), 75);
         assert_eq!(title[0].title, "Song 1");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn search_matches_original_metadata_with_persian_variants_and_stable_ranking() {
+        let (path, mut store) = fixture();
+        store.start_source(1, 10, false).unwrap();
+        let mut title = track(1);
+        title.title = "کیان شب".into();
+        let mut artist = track(2);
+        artist.title = "Evening".into();
+        artist.artist = "كيان".into();
+        let mut filename = track(3);
+        filename.title = "Untitled".into();
+        filename.filename = "كيان-live.mp3".into();
+        store
+            .save_page(1, 10, MediaFilter::Audio, 0, &[title, artist, filename])
+            .unwrap();
+
+        let (matches, count) = store.search_page(1, "  كيان  ", 2, 0).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(
+            matches.iter().map(|t| t.message_id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(matches[0].title, "کیان شب");
+        assert_eq!(matches[1].artist, "كيان");
+        assert_eq!(store.search_page(1, "كِيَان", 50, 0).unwrap().1, 0);
+        assert_eq!(
+            store.search_page(1, "كيان", 2, 2).unwrap().0[0].message_id,
+            3
+        );
+        assert_eq!(store.search_page(1, "EVENING كيان", 50, 0).unwrap().1, 1);
+
+        let mut edited = track(3);
+        edited.title = "Different".into();
+        edited.filename = "different.mp3".into();
+        store.upsert_live(1, 10, &edited).unwrap();
+        assert_eq!(store.search_page(1, "كيان", 50, 0).unwrap().1, 2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn search_is_limited_to_enabled_sources_and_account() {
+        let (path, mut store) = fixture();
+        store.start_source(1, 10, false).unwrap();
+        store
+            .save_page(1, 10, MediaFilter::Audio, 0, &[track(1)])
+            .unwrap();
+        assert_eq!(store.search_page(1, "song", 50, 0).unwrap().1, 1);
+        assert_eq!(store.search_page(2, "song", 50, 0).unwrap().1, 0);
+        let source = SourceStore::open(&path).unwrap();
+        source
+            .set_selected(
+                1,
+                &SourceChat {
+                    chat_id: 10,
+                    title: "Saved Messages".into(),
+                    subtitle: String::new(),
+                    kind: SourceKind::SavedMessages,
+                    selected: false,
+                    music: MusicCheck::Found,
+                },
+                false,
+            )
+            .unwrap();
+        assert_eq!(store.search_page(1, "song", 50, 0).unwrap().1, 0);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn recent_searches_are_deduplicated_bounded_and_account_scoped() {
+        let (path, store) = fixture();
+        for number in 0..10 {
+            store.save_query(1, &format!("Track {number}")).unwrap();
+        }
+        store.save_query(1, "  TRACK   3 ").unwrap();
+        store.save_query(2, "Private query").unwrap();
+        let recent = store.recent_queries(1).unwrap();
+        assert_eq!(recent.len(), 8);
+        assert_eq!(recent[0], "TRACK 3");
+        assert_eq!(
+            recent
+                .iter()
+                .filter(|query| query.to_lowercase() == "track 3")
+                .count(),
+            1
+        );
+        assert_eq!(store.recent_queries(2).unwrap(), vec!["Private query"]);
+        store.clear_history(1).unwrap();
+        assert!(store.recent_queries(1).unwrap().is_empty());
+        assert_eq!(store.recent_queries(2).unwrap().len(), 1);
+        SourceStore::open(&path).unwrap().clear_account(2).unwrap();
+        assert!(store.recent_queries(2).unwrap().is_empty());
         std::fs::remove_file(path).unwrap();
     }
 

@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated: 2026-10-13
+Updated: 2026-10-14
 
 ## Implemented
 
@@ -117,7 +117,7 @@ Updated: 2026-10-13
 ## Library increment
 
 - The Library now uses the dark login and Music Sources palette with the mobile
-  layout from `concept/library.png`. Search remains a black placeholder with
+  layout from `concept/library.png`. At this increment Search was a black placeholder with
   persistent dark bottom navigation and dark Android system bars.
   Category and sorting controls are displayed without active
   behavior. The mini-player stays hidden until playback exists. The icon-only
@@ -277,3 +277,50 @@ This increment keeps storage policy on the Rust service thread and publishes
 immutable snapshots to Dioxus. Filesystem measurement uses a separate worker;
 the playback worker coordinates TDLib file IDs, pending transfers, and
 generation-tagged file copies before changing offline state.
+
+## Search increment
+
+- Search now uses the dark app palette and the track-focused composition from
+  `concept/search.png`. It searches only indexed music from enabled sources,
+  with live results, result counts, pagination, artwork fallback, source names,
+  and indexing, empty, and read-error states. Its starting view shows up to
+  eight account-scoped recent searches and real recently added tracks. The
+  unsupported content-type and source filters and fictional popularity list
+  from the concept are omitted.
+- SQLite v7 adds normalized title, artist, and filename fields and backfills
+  existing indexed tracks. Imports and edits maintain them. Queries match
+  literal case-insensitive terms across fields after Arabic/Persian kaf and
+  yeh normalization and whitespace folding; original metadata stays intact.
+  Title matches rank ahead of artist and filename matches. Searching and
+  recent-query persistence run on the service thread and publish a separate
+  snapshot, leaving Library sorting and letter filtering unchanged.
+- A submitted query or played result saves a deduplicated recent search; typing
+  alone does not. Clear removes this account's search history, and logout
+  removes it with other account data. Playing a result uses the existing full
+  library queue in title order. Search shares the dark Android status bar
+  appearance with the player and other screens.
+
+Host tests cover normalization, v6 backfill, original metadata, ranking,
+pagination, enabled-source and account isolation, live catalog changes,
+recent-query bounds and deduplication, and account clearing. All 55 app and
+7 core tests pass. Host Clippy passes with the pre-existing
+`clippy::manual_checked_ops` warnings in `ui/storage.rs` suppressed; the
+unmodified strict workspace command still reports those two warnings. The
+SDK 35 Android APK built successfully and installed on Samsung SM-A256E
+(Android 14). On that device, `Voice` returned three indexed tracks, submitting
+it saved a recent search that survived reinstall, tapping that history entry
+restored the results, and tapping a result opened the player with all 383
+library tracks in Queue. After the dark-theme update, the Search start and
+results views displayed Persian and English titles without clipping at the
+phone's normal narrow width, with the keyboard open and closed. The status bar
+matched the other dark screens. Playback was paused after
+the handoff check. Device checks did not exercise a Persian variant query,
+live import during an active search, or the error and empty-library states;
+those remain covered by host logic tests or UI code only.
+
+The Rust core owns normalization, while SQLite stores derived search fields
+alongside untouched display strings. A pending query deadline coalesces typing
+on the service thread; Dioxus consumes immutable search snapshots and never
+queries SQLite during rendering. Search currently scans normalized fields
+within the selected account rather than using full-text indexing, so very
+large-library query latency has not been measured.

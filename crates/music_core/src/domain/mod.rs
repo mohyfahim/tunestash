@@ -192,6 +192,30 @@ pub enum LibraryCommand {
     Retry,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchSnapshot {
+    pub account_id: Option<i64>,
+    pub query: String,
+    pub tracks: Vec<TrackSummary>,
+    pub total_count: usize,
+    pub has_more: bool,
+    pub recent_queries: Vec<String>,
+    pub recent_tracks: Vec<TrackSummary>,
+    pub selected_sources: usize,
+    pub indexing_sources: usize,
+    pub error: Option<String>,
+    pub indexing_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SearchCommand {
+    SetQuery(String),
+    SaveQuery(String),
+    ClearHistory,
+    LoadMore,
+    Retry,
+}
+
 /// Stable identity for a Telegram message in the local music library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TrackKey {

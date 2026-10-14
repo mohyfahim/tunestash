@@ -3,7 +3,8 @@
 use super::{TdJson, playable_music_message};
 use crate::adapters::sqlite::library::{LibraryStore, MediaFilter, TrackInput};
 use music_core::domain::{
-    LibraryCommand, LibrarySnapshot, LibrarySort, SourceSnapshot, TrackSummary,
+    LibraryCommand, LibrarySnapshot, LibrarySort, SearchCommand, SearchSnapshot, SourceSnapshot,
+    TrackSummary,
 };
 use serde_json::{Value, json};
 use std::{
@@ -90,6 +91,7 @@ pub(crate) fn parse_track(message: &Value) -> Option<TrackInput> {
 pub struct LibraryEngine {
     store: Option<LibraryStore>,
     updates: watch::Sender<LibrarySnapshot>,
+    search_updates: watch::Sender<SearchSnapshot>,
     account: Option<i64>,
     selected: BTreeSet<i64>,
     queued: VecDeque<Job>,
@@ -97,6 +99,10 @@ pub struct LibraryEngine {
     loaded: usize,
     active_initial: Option<char>,
     sort: LibrarySort,
+    search_query: String,
+    search_loaded: usize,
+    search_pending: Option<(String, Instant)>,
+    search_error: Option<String>,
     error: Option<String>,
     pause_until: Option<Instant>,
 }
@@ -109,7 +115,11 @@ impl LibraryEngine {
             .ok_or("Music library is unavailable")?
             .all_tracks(account, sort)
     }
-    pub fn new(path: &str, updates: watch::Sender<LibrarySnapshot>) -> Self {
+    pub fn new(
+        path: &str,
+        updates: watch::Sender<LibrarySnapshot>,
+        search_updates: watch::Sender<SearchSnapshot>,
+    ) -> Self {
         let store = LibraryStore::open(Path::new(path));
         let error = store
             .as_ref()
@@ -118,6 +128,7 @@ impl LibraryEngine {
         Self {
             store: store.ok(),
             updates,
+            search_updates,
             account: None,
             selected: BTreeSet::new(),
             queued: VecDeque::new(),
@@ -125,6 +136,10 @@ impl LibraryEngine {
             loaded: 50,
             active_initial: None,
             sort: LibrarySort::Title,
+            search_query: String::new(),
+            search_loaded: 50,
+            search_pending: None,
+            search_error: None,
             error,
             pause_until: None,
         }
@@ -174,7 +189,41 @@ impl LibraryEngine {
             })
             .collect::<BTreeSet<_>>()
             .len();
+        self.search_updates
+            .send_replace(self.search_snapshot(&snapshot));
         self.updates.send_replace(snapshot);
+    }
+
+    fn search_snapshot(&self, library: &LibrarySnapshot) -> SearchSnapshot {
+        let mut snapshot = SearchSnapshot {
+            account_id: self.account,
+            query: self.search_query.clone(),
+            selected_sources: library.selected_sources,
+            indexing_sources: library.indexing_sources,
+            recent_tracks: library.recent_tracks.clone(),
+            error: self.search_error.clone(),
+            indexing_error: library.error.clone(),
+            ..Default::default()
+        };
+        if let (Some(store), Some(account)) = (&self.store, self.account) {
+            match store.recent_queries(account) {
+                Ok(queries) => snapshot.recent_queries = queries,
+                Err(_) => snapshot.error = Some("Can't read recent searches. Try again.".into()),
+            }
+            if !self.search_query.is_empty() {
+                match store.search_page(account, &self.search_query, self.search_loaded, 0) {
+                    Ok((tracks, count)) => {
+                        snapshot.has_more = count > tracks.len();
+                        snapshot.total_count = count;
+                        snapshot.tracks = tracks;
+                    }
+                    Err(_) => {
+                        snapshot.error = Some("Can't search the music library. Try again.".into())
+                    }
+                }
+            }
+        }
+        snapshot
     }
 
     pub fn reset(&mut self) {
@@ -186,6 +235,10 @@ impl LibraryEngine {
         self.loaded = 50;
         self.active_initial = None;
         self.sort = LibrarySort::Title;
+        self.search_query.clear();
+        self.search_loaded = 50;
+        self.search_pending = None;
+        self.search_error = None;
         if self.store.is_some() {
             self.error = None;
         }
@@ -325,6 +378,70 @@ impl LibraryEngine {
                 self.publish();
             }
         }
+    }
+
+    pub fn search_command(&mut self, command: SearchCommand) {
+        match command {
+            SearchCommand::SetQuery(query) => {
+                self.search_error = None;
+                let query = query
+                    .chars()
+                    .take(128)
+                    .collect::<String>()
+                    .trim()
+                    .to_string();
+                if query.is_empty() {
+                    self.search_pending = None;
+                    self.search_query = query;
+                    self.search_loaded = 50;
+                } else if self.search_query != query {
+                    self.search_pending =
+                        Some((query, Instant::now() + Duration::from_millis(180)));
+                    return;
+                } else {
+                    self.search_pending = None;
+                    return;
+                }
+            }
+            SearchCommand::SaveQuery(query) => {
+                self.search_error = None;
+                let query = query
+                    .chars()
+                    .take(128)
+                    .collect::<String>()
+                    .trim()
+                    .to_string();
+                self.search_pending = None;
+                if self.search_query != query {
+                    self.search_query = query.clone();
+                    self.search_loaded = 50;
+                }
+                if let (Some(store), Some(account)) = (&self.store, self.account) {
+                    if store.save_query(account, &query).is_err() {
+                        self.search_error =
+                            Some("Can't save this recent search. Try again.".into());
+                    }
+                }
+            }
+            SearchCommand::ClearHistory => {
+                self.search_error = None;
+                if let (Some(store), Some(account)) = (&self.store, self.account)
+                    && store.clear_history(account).is_err()
+                {
+                    self.search_error = Some("Can't clear recent searches. Try again.".into());
+                }
+            }
+            SearchCommand::LoadMore => {
+                self.search_loaded = self.search_loaded.saturating_add(50);
+            }
+            SearchCommand::Retry => {
+                self.search_error = None;
+                if self.error.is_some() {
+                    self.command(LibraryCommand::Retry);
+                }
+            }
+        }
+        self.publish();
     }
 
     pub fn observe_update(&mut self, value: &Value) {
@@ -471,6 +588,16 @@ impl LibraryEngine {
     }
 
     pub fn drive(&mut self, td: &TdJson) {
+        if self
+            .search_pending
+            .as_ref()
+            .is_some_and(|(_, at)| Instant::now() >= *at)
+            && let Some((query, _)) = self.search_pending.take()
+        {
+            self.search_query = query;
+            self.search_loaded = 50;
+            self.publish();
+        }
         if self.error.is_some() {
             return;
         }
@@ -584,7 +711,8 @@ mod tests {
             )
             .unwrap();
         let (updates, _) = watch::channel(LibrarySnapshot::default());
-        let mut engine = LibraryEngine::new(path.to_str().unwrap(), updates);
+        let (search_updates, _) = watch::channel(SearchSnapshot::default());
+        let mut engine = LibraryEngine::new(path.to_str().unwrap(), updates, search_updates);
         let mut sources = SourceSnapshot {
             account_id: Some(7),
             setup_complete: true,
@@ -662,7 +790,8 @@ mod tests {
             .unwrap();
         drop(store);
         let (updates, receiver) = watch::channel(LibrarySnapshot::default());
-        let mut engine = LibraryEngine::new(path.to_str().unwrap(), updates);
+        let (search_updates, _) = watch::channel(SearchSnapshot::default());
+        let mut engine = LibraryEngine::new(path.to_str().unwrap(), updates, search_updates);
         let sources = SourceSnapshot {
             account_id: Some(7),
             setup_complete: true,
@@ -700,7 +829,8 @@ mod tests {
         };
         source_store.set_selected(7, &chat, true).unwrap();
         let (updates, receiver) = watch::channel(LibrarySnapshot::default());
-        let mut engine = LibraryEngine::new(path.to_str().unwrap(), updates);
+        let (search_updates, search_receiver) = watch::channel(SearchSnapshot::default());
+        let mut engine = LibraryEngine::new(path.to_str().unwrap(), updates, search_updates);
         engine.sync_sources(&SourceSnapshot {
             account_id: Some(7),
             setup_complete: true,
@@ -750,6 +880,24 @@ mod tests {
         assert_eq!(receiver.borrow().total_count, 3);
         engine.command(LibraryCommand::SelectInitial('1'));
         assert_eq!(receiver.borrow().active_initial, None);
+        engine.command(LibraryCommand::SelectInitial('A'));
+        engine.search_command(SearchCommand::SaveQuery("Blue".into()));
+        assert_eq!(receiver.borrow().active_initial, Some('A'));
+        assert_eq!(search_receiver.borrow().total_count, 1);
+        assert_eq!(search_receiver.borrow().tracks[0].title, "Blue");
+        engine.observe_update(&json!({
+            "@type":"updateNewMessage", "message":{
+                "id":4, "chat_id":42, "date":4,
+                "content":{"@type":"messageAudio", "audio":{
+                    "title":"Bluebird", "file_name":"bluebird.mp3"
+                }}
+            }
+        }));
+        assert_eq!(search_receiver.borrow().total_count, 2);
+        assert_eq!(receiver.borrow().total_count, 2);
+        engine.search_command(SearchCommand::SetQuery("Amber".into()));
+        assert!(engine.search_pending.is_some());
+        assert_eq!(search_receiver.borrow().recent_queries, vec!["Blue"]);
         drop(engine);
         drop(source_store);
         std::fs::remove_file(path).unwrap();
