@@ -54,7 +54,7 @@ pub fn HomeView(
                             li { class: "home-media-card", key: "{track.chat_id}-{track.message_id}",
                                 div { class: "home-media-art",
                                     if let Some(cover) = &track.cover_data {
-                                        img { src: "data:image/jpeg;base64,{cover}", alt: "" }
+                                        img { src: super::cover_src(cover), alt: "" }
                                     } else {
                                         img { class: "home-art-fallback", src: NOTE, alt: "" }
                                     }
@@ -81,7 +81,7 @@ pub fn HomeView(
                                     aria_label: format!("Play {} by {}", track.title, track.artist),
                                     onclick: { let key = TrackKey { account_id: snapshot.account_id.unwrap_or_default(), chat_id: track.chat_id, message_id: track.message_id }; move |_| on_play.call(key) },
                                     span { class: "home-listening-art",
-                                        if let Some(cover) = &track.cover_data { img { src: "data:image/jpeg;base64,{cover}", alt: "" } }
+                                        if let Some(cover) = &track.cover_data { img { src: super::cover_src(cover), alt: "" } }
                                         else { img { src: NOTE, alt: "" } }
                                     }
                                     span { class: "home-listening-copy", strong { dir: "auto", "{track.title}" } small { dir: "auto", "{track.artist}" } }

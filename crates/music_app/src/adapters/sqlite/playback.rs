@@ -324,8 +324,16 @@ impl PlaybackStore {
         let Some((cursor, position, shuffle, repeat)) = row else {
             return Ok(state);
         };
-        let mut stmt = self.connection.prepare("SELECT chat_id,message_id,title,artist,filename,duration_seconds,cover_data,play_order
-            FROM playback_queue WHERE account_id=?1 ORDER BY slot").map_err(|e| e.to_string())?;
+        let mut stmt = self
+            .connection
+            .prepare(
+                "SELECT q.chat_id,q.message_id,q.title,q.artist,q.filename,
+            q.duration_seconds,COALESCE(t.cover_data,q.cover_data),q.play_order
+            FROM playback_queue AS q LEFT JOIN indexed_tracks AS t
+              ON t.account_id=q.account_id AND t.chat_id=q.chat_id AND t.message_id=q.message_id
+            WHERE q.account_id=?1 ORDER BY q.slot",
+            )
+            .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([account], |r| {
                 Ok((

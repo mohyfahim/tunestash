@@ -160,6 +160,40 @@ fn migrate_search(connection: &Connection) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+fn migrate_artwork(connection: &Connection) -> Result<(), String> {
+    let columns: Vec<String> = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(indexed_tracks)")
+            .map_err(|error| error.to_string())?;
+        statement
+            .query_map([], |row| row.get(1))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    connection
+        .execute_batch("BEGIN IMMEDIATE;")
+        .map_err(|error| error.to_string())?;
+    if !columns.iter().any(|name| name == "cover_quality") {
+        connection
+            .execute_batch(
+                "ALTER TABLE indexed_tracks ADD COLUMN cover_quality INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    if !columns.iter().any(|name| name == "cover_checked") {
+        connection
+            .execute_batch(
+                "ALTER TABLE indexed_tracks ADD COLUMN cover_checked INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    connection.execute_batch(
+        "UPDATE indexed_tracks SET cover_quality=1 WHERE cover_data IS NOT NULL AND cover_quality=0;
+         PRAGMA user_version=9; COMMIT;"
+    ).map_err(|error| error.to_string())
+}
+
 pub struct SourceStore {
     connection: Connection,
 }
@@ -170,7 +204,7 @@ impl SourceStore {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version > 8 {
+        if version > 9 {
             return Err("Source database was created by a newer app version.".into());
         }
         connection
@@ -287,6 +321,9 @@ impl SourceStore {
                  COMMIT;",
                 )
                 .map_err(|error| error.to_string())?;
+        }
+        if version < 9 {
+            migrate_artwork(&connection)?;
         }
         Ok(Self { connection })
     }
@@ -533,6 +570,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn v8_artwork_upgrade_preserves_existing_previews() {
+        let path = std::env::temp_dir().join(format!(
+            "tunestash-artwork-migration-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE indexed_tracks (
+            account_id INTEGER, chat_id INTEGER, message_id INTEGER,
+            media_type TEXT, message_date INTEGER, title TEXT, artist TEXT,
+            filename TEXT, duration_seconds INTEGER, cover_data TEXT,
+            scan_generation INTEGER, search_title TEXT, search_artist TEXT, search_filename TEXT,
+            PRIMARY KEY(account_id,chat_id,message_id));
+            INSERT INTO indexed_tracks VALUES (1,2,3,'audio',1,'505','Arctic Monkeys',
+                '505.mp3',60,'old-preview',1,'505','arctic monkeys','505.mp3');
+            PRAGMA user_version=8;",
+        )
+        .unwrap();
+        drop(old);
+        let upgraded = SourceStore::open(&path).unwrap();
+        let (data, quality, checked): (String, i64, i64) = upgraded.connection.query_row(
+            "SELECT cover_data,cover_quality,cover_checked FROM indexed_tracks WHERE message_id=3",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!((data.as_str(), quality, checked), ("old-preview", 1, 0));
+        upgraded
+            .set_selected(
+                1,
+                &SourceChat {
+                    chat_id: 2,
+                    title: "Music".into(),
+                    subtitle: String::new(),
+                    kind: SourceKind::OtherChat,
+                    selected: true,
+                    music: MusicCheck::Found,
+                },
+                true,
+            )
+            .unwrap();
+        drop(upgraded);
+        let library = library::LibraryStore::open(&path).unwrap();
+        assert_eq!(library.missing_artwork(1, 0, 10).unwrap(), vec![(1, 2, 3)]);
+        drop(library);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn migration_adds_listening_history_to_an_existing_database() {
         let path = std::env::temp_dir().join(format!(
             "tunestash-recent-migration-{}.sqlite",
@@ -550,7 +637,7 @@ mod tests {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         connection
             .execute("INSERT INTO recent_plays VALUES (1,2,3,1)", [])
             .unwrap();
@@ -725,7 +812,7 @@ mod tests {
         let version: i64 = upgraded
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         drop(upgraded);
         let _ = std::fs::remove_file(path);
     }
@@ -774,7 +861,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         std::fs::remove_file(path).unwrap();
     }
 }

@@ -387,8 +387,43 @@ used directory size and offline-folder contents instead.
 
 The following checks remain unverified on a device: the new player footer at
 960 px width, an actual completed track in history, profile initials when no
-photo exists, the Android launcher and splash appearance (the APK resources
-were inspected), and the cleanup failure/Retry screen. The device's TuneStash
+photo exists, the Android splash appearance, and the cleanup failure/Retry
+screen. At that checkpoint, the device's TuneStash
 account was signed out during the approved cleanup check; using the app again
 requires a new Telegram sign-in. No phone number or verification code was
 entered after sign-out.
+
+## Launcher, source control, and library artwork increment
+
+- The adaptive launcher uses an opaque lime background and a separate dark
+  mark sized for Android's safe area. All legacy density icons have opaque lime
+  backgrounds. The selected-source remove button shows a cross while the
+  unselected add button keeps its plus and the remove accessibility label.
+- SQLite v9 tracks artwork quality and whether a message has been checked for a
+  thumbnail. Migration preserves existing cover data, and reindexing cannot
+  overwrite a downloaded thumbnail or embedded cover with a smaller preview.
+  Account cleanup removes these rows with the rest of the library.
+- Selected audio and document messages supply small previews and Telegram
+  thumbnail file IDs. At most two cover downloads run at once. Completed image
+  files are size and format checked, stored with the library record, and
+  published to Library, Home, Search, and the playback queue. Existing indexed
+  tracks without a checked thumbnail, including tracks with a migrated small
+  preview, are revisited through paged message lookups. Playback and explicit
+  audio downloads also save embedded cover art at the highest quality level.
+  Full audio files are never downloaded solely to look for artwork.
+
+Formatting, all 73 workspace tests, strict host Clippy, the Android ARM64 Rust
+check, and the SDK 35 APK build pass. Host tests cover audio/document thumbnail
+parsing, download completion, bounded backfill beyond 200 tracks, v8 migration,
+and cover preservation after reindex and restart. The APK contains the new
+adaptive foreground glyph and all legacy icon densities with opaque lime
+corners.
+
+On Samsung SM-A256E (Android 14), the installed app drawer icon showed no dark
+gap. Sources showed a cross on selected rows and a plus on unselected rows.
+Before playback, “505” used the fallback in Library; after playback, its
+embedded cover appeared in the Library row and mini-player. Both still showed
+the cover after force-stop and cold launch. A track without a Telegram preview
+continues to use the fallback until playback or an explicit download reveals
+embedded art. Device checks did not exercise a Telegram cover-thumbnail
+download or every library artwork source; those paths have host coverage.

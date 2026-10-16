@@ -9,6 +9,7 @@ mod android {
         sys::{jbyteArray, jlong},
     };
     use music_core::domain::TrackKey;
+    use std::path::Path;
     use std::sync::OnceLock;
 
     static SERVICE_CONTEXT: OnceLock<(JavaVM, GlobalRef)> = OnceLock::new();
@@ -44,6 +45,31 @@ mod android {
             )
             .map_err(|e| e.to_string())?;
             Ok(())
+        })
+    }
+
+    pub fn extract_artwork(path: &Path) -> Result<Option<String>, String> {
+        with_context(|env, context| {
+            let class = env.get_object_class(context).map_err(|e| e.to_string())?;
+            let path = env
+                .new_string(path.to_string_lossy().as_ref())
+                .map_err(|e| e.to_string())?;
+            let result = env
+                .call_static_method(
+                    class,
+                    "extractArtwork",
+                    "(Ljava/lang/String;)Ljava/lang/String;",
+                    &[JValue::Object(&path)],
+                )
+                .map_err(|e| e.to_string())?
+                .l()
+                .map_err(|e| e.to_string())?;
+            if result.is_null() {
+                return Ok(None);
+            }
+            let value = JString::from(result);
+            let data = env.get_string(&value).map_err(|e| e.to_string())?;
+            Ok(Some(data.to_string_lossy().into_owned()))
         })
     }
 
@@ -102,9 +128,16 @@ mod android {
 }
 
 #[cfg(target_os = "android")]
+pub use android::extract_artwork;
+#[cfg(target_os = "android")]
 pub use android::{dispatch, with_context};
 
 #[cfg(not(target_os = "android"))]
 pub fn dispatch(_action: &str, _payload: &str) -> Result<(), String> {
     Err("Playback is available in the Android app.".into())
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn extract_artwork(_path: &std::path::Path) -> Result<Option<String>, String> {
+    Ok(None)
 }

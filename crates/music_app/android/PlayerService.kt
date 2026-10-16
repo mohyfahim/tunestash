@@ -42,6 +42,27 @@ class PlayerService : MediaSessionService() {
     companion object {
         init { System.loadLibrary("main") }
 
+        private fun artworkPreview(raw: ByteArray, maxDimension: Int = 512): String? {
+            if (raw.size > 2_000_000) return null
+            val bitmap = BitmapFactory.decodeByteArray(raw, 0, raw.size) ?: return null
+            val scale = minOf(1f, maxDimension.toFloat() / maxOf(bitmap.width, bitmap.height))
+            val resized = if (scale < 1f) Bitmap.createScaledBitmap(
+                bitmap, (bitmap.width * scale).toInt().coerceAtLeast(1),
+                (bitmap.height * scale).toInt().coerceAtLeast(1), true
+            ) else bitmap
+            val output = ByteArrayOutputStream()
+            resized.compress(Bitmap.CompressFormat.JPEG, 80, output)
+            if (resized !== bitmap) resized.recycle()
+            bitmap.recycle()
+            val jpeg = output.toByteArray()
+            return if (jpeg.size <= 180_000)
+                "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
+            else null
+        }
+
+        @JvmStatic
+        fun extractArtwork(path: String): String? = MainActivity.extractArtwork(path)
+
         @JvmStatic
         fun getOrCreateTdlibKey(context: Context): String = MainActivity.getOrCreateTdlibKey(context)
 
@@ -131,11 +152,16 @@ class PlayerService : MediaSessionService() {
                 ) else bitmap
                 val output = ByteArrayOutputStream()
                 resized.compress(Bitmap.CompressFormat.JPEG, 85, output)
+                if (resized !== bitmap) resized.recycle()
+                bitmap.recycle()
                 val jpeg = output.toByteArray()
-                if (jpeg.size <= 500_000) {
-                    nativeEvent(JSONObject().put("type", "artwork").put("media_id", mediaId)
-                        .put("data", "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)).toString())
-                }
+                val preview = artworkPreview(raw)
+                val playerData = if (jpeg.size <= 500_000)
+                    "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
+                else preview
+                if (playerData != null) nativeEvent(JSONObject().put("type", "artwork")
+                    .put("media_id", mediaId).put("data", playerData)
+                    .put("library_data", preview).toString())
             }
         })
         val previousButton = CommandButton.Builder(CommandButton.ICON_PREVIOUS)

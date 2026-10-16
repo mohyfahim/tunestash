@@ -35,12 +35,10 @@ pub fn PlayerView(
     let Some(track) = snapshot.current().cloned() else {
         return rsx! {};
     };
-    let cover = snapshot.artwork_data.clone().or_else(|| {
-        track
-            .cover_data
-            .as_ref()
-            .map(|data| format!("data:image/jpeg;base64,{data}"))
-    });
+    let cover = snapshot
+        .artwork_data
+        .clone()
+        .or_else(|| track.cover_data.as_ref().map(|data| super::cover_src(data)));
     let duration = snapshot
         .duration_ms
         .or(track.duration_seconds.map(|s| s * 1000))
@@ -206,7 +204,7 @@ pub fn MiniPlayer(snapshot: PlaybackSnapshot, on_open: EventHandler<()>) -> Elem
     rsx! {
         div { class: "mini-player",
             button { class: "mini-player-open", r#type: "button", onclick: move |_| on_open.call(()),
-                if let Some(cover) = snapshot.artwork_data.clone().or_else(|| track.cover_data.as_ref().map(|data| format!("data:image/jpeg;base64,{data}"))) { img { src: cover, alt: "" } }
+                if let Some(cover) = snapshot.artwork_data.clone().or_else(|| track.cover_data.as_ref().map(|data| super::cover_src(data))) { img { src: cover, alt: "" } }
                 else { img { src: NOTE, alt: "" } }
                 span { strong { dir: "auto", "{track.title}" } small { dir: "auto", "{track.artist}" } }
             }

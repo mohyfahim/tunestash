@@ -3,12 +3,16 @@ package dev.dioxus.main
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.os.Build
 import android.os.Bundle
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.webkit.WebView
+import java.io.ByteArrayOutputStream
 import java.security.KeyStore
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -32,6 +36,34 @@ class MainActivity : WryActivity() {
     }
 
     companion object {
+        @JvmStatic
+        fun extractArtwork(path: String): String? {
+            val retriever = MediaMetadataRetriever()
+            return try {
+                retriever.setDataSource(path)
+                val raw = retriever.embeddedPicture ?: return null
+                if (raw.size > 2_000_000) return null
+                val bitmap = BitmapFactory.decodeByteArray(raw, 0, raw.size) ?: return null
+                val scale = minOf(1f, 512f / maxOf(bitmap.width, bitmap.height))
+                val resized = if (scale < 1f) Bitmap.createScaledBitmap(
+                    bitmap, (bitmap.width * scale).toInt().coerceAtLeast(1),
+                    (bitmap.height * scale).toInt().coerceAtLeast(1), true
+                ) else bitmap
+                val output = ByteArrayOutputStream()
+                resized.compress(Bitmap.CompressFormat.JPEG, 80, output)
+                if (resized !== bitmap) resized.recycle()
+                bitmap.recycle()
+                val jpeg = output.toByteArray()
+                if (jpeg.size <= 180_000)
+                    "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
+                else null
+            } catch (_: Exception) {
+                null
+            } finally {
+                retriever.release()
+            }
+        }
+
         @JvmStatic
         fun playerCommand(context: Context, action: String, payload: String) {
             val intent = Intent().setClassName(context, "dev.dioxus.main.PlayerService")

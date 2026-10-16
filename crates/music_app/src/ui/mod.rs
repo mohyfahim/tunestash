@@ -5,6 +5,14 @@ mod home;
 mod library;
 mod player;
 mod search;
+
+fn cover_src(data: &str) -> String {
+    if data.starts_with("data:image/") {
+        data.to_string()
+    } else {
+        format!("data:image/jpeg;base64,{data}")
+    }
+}
 mod settings;
 mod sources;
 mod storage;

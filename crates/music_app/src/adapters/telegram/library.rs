@@ -1,10 +1,11 @@
-//! Selected-source metadata indexing. No audio or thumbnail files are fetched.
+//! Selected-source metadata indexing and bounded cover-thumbnail downloads.
 
 use super::{TdJson, playable_music_message};
 use crate::adapters::sqlite::library::{LibraryStore, MediaFilter, TrackInput};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use music_core::domain::{
     LibraryCommand, LibrarySnapshot, LibrarySort, SearchCommand, SearchSnapshot, SourceSnapshot,
-    TrackSummary,
+    TrackKey, TrackSummary,
 };
 use serde_json::{Value, json};
 use std::{
@@ -17,6 +18,7 @@ use tokio::sync::watch;
 const PAGE_SIZE: i64 = 50;
 const HOME_RECENT_LIMIT: usize = 12;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
+const BACKFILL_PAGE_SIZE: usize = 200;
 
 #[derive(Clone, Debug)]
 enum Job {
@@ -29,12 +31,24 @@ enum Job {
         chat: i64,
         message: i64,
     },
+    Backfill {
+        chat: i64,
+        message: i64,
+    },
+    Cover {
+        chat: i64,
+        message: i64,
+        file_id: i64,
+    },
 }
 
 impl Job {
     fn chat(&self) -> i64 {
         match self {
-            Self::Scan { chat, .. } | Self::Refresh { chat, .. } => *chat,
+            Self::Scan { chat, .. }
+            | Self::Refresh { chat, .. }
+            | Self::Backfill { chat, .. }
+            | Self::Cover { chat, .. } => *chat,
         }
     }
 }
@@ -72,7 +86,12 @@ pub(crate) fn parse_track(message: &Value) -> Option<TrackInput> {
         .trim()
         .to_string();
     let duration_seconds = info["duration"].as_i64().filter(|duration| *duration > 0);
-    let cover_data = info["album_cover_minithumbnail"]["data"]
+    let mini = if media_type == "audio" {
+        &info["album_cover_minithumbnail"]
+    } else {
+        &info["minithumbnail"]
+    };
+    let cover_data = mini["data"]
         .as_str()
         .filter(|data| !data.is_empty() && data.len() < 32_768)
         .map(str::to_string);
@@ -88,6 +107,45 @@ pub(crate) fn parse_track(message: &Value) -> Option<TrackInput> {
     })
 }
 
+fn cover_file_id(message: &Value) -> Option<i64> {
+    let content = &message["content"];
+    if content["@type"] == "messageAudio" {
+        let audio = &content["audio"];
+        audio["album_cover_thumbnail"]["file"]["id"]
+            .as_i64()
+            .or_else(|| {
+                audio["external_album_covers"]
+                    .as_array()?
+                    .iter()
+                    .find_map(|cover| cover["file"]["id"].as_i64())
+            })
+    } else if content["@type"] == "messageDocument" {
+        content["document"]["thumbnail"]["file"]["id"].as_i64()
+    } else {
+        None
+    }
+}
+
+fn image_data(file: &Value) -> Option<String> {
+    let local = &file["local"];
+    if local["is_downloading_completed"] != true {
+        return None;
+    }
+    let path = local["path"].as_str()?;
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() > 512_000 {
+        return None;
+    }
+    let mime = if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else {
+        return None;
+    };
+    Some(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
+}
+
 pub struct LibraryEngine {
     store: Option<LibraryStore>,
     updates: watch::Sender<LibrarySnapshot>,
@@ -96,6 +154,10 @@ pub struct LibraryEngine {
     selected: BTreeSet<i64>,
     queued: VecDeque<Job>,
     active: BTreeMap<i64, (Job, Instant)>,
+    cover_downloads: BTreeMap<i64, (Vec<(i64, i64)>, Instant)>,
+    backfill_cursor: i64,
+    backfill_exhausted: bool,
+    artwork_updates: Vec<(TrackKey, String)>,
     loaded: usize,
     active_initial: Option<char>,
     sort: LibrarySort,
@@ -133,6 +195,10 @@ impl LibraryEngine {
             selected: BTreeSet::new(),
             queued: VecDeque::new(),
             active: BTreeMap::new(),
+            cover_downloads: BTreeMap::new(),
+            backfill_cursor: 0,
+            backfill_exhausted: false,
+            artwork_updates: Vec::new(),
             loaded: 50,
             active_initial: None,
             sort: LibrarySort::Title,
@@ -206,6 +272,112 @@ impl LibraryEngine {
         self.publish();
     }
 
+    pub fn save_embedded_art(&mut self, account: i64, chat: i64, message: i64, data: &str) {
+        if self.account == Some(account)
+            && self.selected.contains(&chat)
+            && let Some(store) = &self.store
+            && store
+                .save_artwork(account, chat, message, data, 3)
+                .unwrap_or(false)
+        {
+            self.artwork_updates.push((
+                TrackKey {
+                    account_id: account,
+                    chat_id: chat,
+                    message_id: message,
+                },
+                data.to_string(),
+            ));
+            self.publish();
+        }
+    }
+
+    pub fn take_artwork_updates(&mut self) -> Vec<(TrackKey, String)> {
+        std::mem::take(&mut self.artwork_updates)
+    }
+
+    fn queue_cover(&mut self, chat: i64, message: i64, file_id: i64) {
+        if file_id <= 0 {
+            return;
+        }
+        let Some(account) = self.account else {
+            return;
+        };
+        if !self.selected.contains(&chat)
+            || !self.store.as_ref().is_some_and(|store|
+                store.artwork_quality(account, chat, message).is_ok_and(|quality| quality < 2))
+            || self.queued.iter().any(|job| matches!(job, Job::Cover { chat: c, message: m, .. } if *c == chat && *m == message))
+            || self.cover_downloads.values().any(|(keys, _)| keys.contains(&(chat, message)))
+        { return; }
+        self.queued.push_back(Job::Cover {
+            chat,
+            message,
+            file_id,
+        });
+    }
+
+    fn queue_backfill_page(&mut self) {
+        if self.backfill_exhausted {
+            return;
+        }
+        let (Some(account), Some(store)) = (self.account, &self.store) else {
+            return;
+        };
+        let Ok(missing) = store.missing_artwork(account, self.backfill_cursor, BACKFILL_PAGE_SIZE)
+        else {
+            self.backfill_exhausted = true;
+            return;
+        };
+        if missing.len() < BACKFILL_PAGE_SIZE {
+            self.backfill_exhausted = true;
+        }
+        for (rowid, chat, message) in missing {
+            self.backfill_cursor = rowid;
+            if self.selected.contains(&chat)
+                && !self.queued.iter().any(|job| matches!(job, Job::Backfill { chat: c, message: m } if *c == chat && *m == message))
+            { self.queued.push_back(Job::Backfill { chat, message }); }
+        }
+    }
+
+    pub fn observe_file(&mut self, value: &Value) {
+        if value["@type"] != "updateFile" {
+            return;
+        }
+        let file = &value["file"];
+        let Some(file_id) = file["id"].as_i64() else {
+            return;
+        };
+        if file["local"]["is_downloading_completed"] != true {
+            return;
+        }
+        if let Some((keys, _)) = self.cover_downloads.remove(&file_id)
+            && let (Some(account), Some(data), Some(store)) =
+                (self.account, image_data(file), &self.store)
+        {
+            let mut changed = false;
+            for (chat, message) in keys {
+                if self.selected.contains(&chat)
+                    && store
+                        .save_artwork(account, chat, message, &data, 2)
+                        .unwrap_or(false)
+                {
+                    changed = true;
+                    self.artwork_updates.push((
+                        TrackKey {
+                            account_id: account,
+                            chat_id: chat,
+                            message_id: message,
+                        },
+                        data.clone(),
+                    ));
+                }
+            }
+            if changed {
+                self.publish();
+            }
+        }
+    }
+
     fn search_snapshot(&self, library: &LibrarySnapshot) -> SearchSnapshot {
         let mut snapshot = SearchSnapshot {
             account_id: self.account,
@@ -243,6 +415,10 @@ impl LibraryEngine {
         self.selected.clear();
         self.queued.clear();
         self.active.clear();
+        self.cover_downloads.clear();
+        self.backfill_cursor = 0;
+        self.backfill_exhausted = false;
+        self.artwork_updates.clear();
         self.pause_until = None;
         self.loaded = 50;
         self.active_initial = None;
@@ -281,6 +457,10 @@ impl LibraryEngine {
         self.queued.retain(|job| desired.contains(&job.chat()));
         self.active
             .retain(|_, (job, _)| desired.contains(&job.chat()));
+        self.cover_downloads.retain(|_, (keys, _)| {
+            keys.retain(|(chat, _)| desired.contains(chat));
+            !keys.is_empty()
+        });
         if let (Some(store), Some(account)) = (&self.store, account) {
             for chat in desired.difference(&self.selected) {
                 match store.start_source(account, *chat, false) {
@@ -301,6 +481,9 @@ impl LibraryEngine {
             }
         }
         self.selected = desired;
+        self.backfill_cursor = 0;
+        self.backfill_exhausted = false;
+        self.queue_backfill_page();
         self.publish();
     }
 
@@ -503,6 +686,16 @@ impl LibraryEngine {
             _ => false,
         };
         if changed {
+            if kind == "updateNewMessage" {
+                let message = &value["message"];
+                if let (Some(chat), Some(message_id), Some(file_id)) = (
+                    message["chat_id"].as_i64(),
+                    message["id"].as_i64(),
+                    cover_file_id(message),
+                ) {
+                    self.queue_cover(chat, message_id, file_id);
+                }
+            }
             self.publish();
         }
     }
@@ -521,6 +714,18 @@ impl LibraryEngine {
             return true;
         }
         if value["@type"] == "error" {
+            if let Job::Cover { file_id, .. } = job {
+                self.cover_downloads.remove(&file_id);
+                return true;
+            }
+            if let Job::Backfill { chat, message } = job {
+                if value["code"] == 404
+                    && let Some(store) = &self.store
+                {
+                    let _ = store.mark_artwork_checked(account, chat, message);
+                }
+                return true;
+            }
             if let Job::Refresh { chat, message } = &job
                 && value["code"] == 404
             {
@@ -550,6 +755,7 @@ impl LibraryEngine {
         let Some(store) = &mut self.store else {
             return true;
         };
+        let mut covers = Vec::new();
         let result = match job {
             Job::Scan {
                 chat,
@@ -567,7 +773,13 @@ impl LibraryEngine {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .filter_map(parse_track)
+                        .filter_map(|message| {
+                            let track = parse_track(message)?;
+                            if let Some(file_id) = cover_file_id(message) {
+                                covers.push((chat, track.message_id, file_id));
+                            }
+                            Some(track)
+                        })
                         .collect();
                     store
                         .save_page(account, chat, filter, next, &tracks)
@@ -584,15 +796,65 @@ impl LibraryEngine {
             }
             Job::Refresh { chat, message } => {
                 if let Some(track) = parse_track(value) {
+                    if let Some(file_id) = cover_file_id(value) {
+                        covers.push((chat, message, file_id));
+                    }
                     store.upsert_live(account, chat, &track)
                 } else {
                     store.remove_message(account, chat, message)
                 }
             }
+            Job::Backfill { chat, message } => {
+                if let Some(track) = parse_track(value) {
+                    if let Some(file_id) = cover_file_id(value) {
+                        covers.push((chat, message, file_id));
+                    } else {
+                        let _ = store.mark_artwork_checked(account, chat, message);
+                    }
+                    store.upsert_live(account, chat, &track)
+                } else {
+                    store.mark_artwork_checked(account, chat, message)
+                }
+            }
+            Job::Cover {
+                chat,
+                message,
+                file_id,
+            } => {
+                if value["@type"] != "file" {
+                    self.cover_downloads.remove(&file_id);
+                } else if let Some(data) = image_data(value) {
+                    let keys = self
+                        .cover_downloads
+                        .remove(&file_id)
+                        .map(|(keys, _)| keys)
+                        .unwrap_or_else(|| vec![(chat, message)]);
+                    for (chat, message) in keys {
+                        if self.selected.contains(&chat)
+                            && store
+                                .save_artwork(account, chat, message, &data, 2)
+                                .unwrap_or(false)
+                        {
+                            self.artwork_updates.push((
+                                TrackKey {
+                                    account_id: account,
+                                    chat_id: chat,
+                                    message_id: message,
+                                },
+                                data.clone(),
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            }
         };
         if result.is_err() {
             self.error =
                 Some("Couldn't save a music index page. Check device storage and retry.".into());
+        }
+        for (chat, message, file_id) in covers {
+            self.queue_cover(chat, message, file_id);
         }
         self.publish();
         true
@@ -623,22 +885,61 @@ impl LibraryEngine {
             .map(|(id, _)| *id)
             .collect();
         if !timed_out.is_empty() {
+            let mut scan_timed_out = false;
             for id in timed_out {
-                self.active.remove(&id);
+                if let Some((job, _)) = self.active.remove(&id)
+                    && matches!(job, Job::Scan { .. } | Job::Refresh { .. })
+                {
+                    scan_timed_out = true;
+                }
             }
-            self.error = Some(
-                "Telegram stopped responding while indexing. Check the connection and retry."
-                    .into(),
-            );
-            self.publish();
-            return;
+            if scan_timed_out {
+                self.error = Some(
+                    "Telegram stopped responding while indexing. Check the connection and retry."
+                        .into(),
+                );
+                self.publish();
+                return;
+            }
         }
-        while self.active.len() < 2 {
+        self.cover_downloads
+            .retain(|_, (_, since)| since.elapsed() <= REQUEST_TIMEOUT);
+        if !self
+            .queued
+            .iter()
+            .any(|job| matches!(job, Job::Backfill { .. }))
+            && !self
+                .active
+                .values()
+                .any(|(job, _)| matches!(job, Job::Backfill { .. }))
+        {
+            self.queue_backfill_page();
+        }
+        let mut remaining = self.queued.len();
+        while self.active.len() < 2 && remaining > 0 {
+            remaining -= 1;
             let Some(job) = self.queued.pop_front() else {
                 break;
             };
             if !self.selected.contains(&job.chat()) {
                 continue;
+            }
+            if let Job::Cover {
+                chat,
+                message,
+                file_id,
+            } = job
+            {
+                if let Some((keys, _)) = self.cover_downloads.get_mut(&file_id) {
+                    if !keys.contains(&(chat, message)) {
+                        keys.push((chat, message));
+                    }
+                    continue;
+                }
+                if self.cover_downloads.len() >= 2 {
+                    self.queued.push_back(job);
+                    continue;
+                }
             }
             let request = match job {
                 Job::Scan {
@@ -653,19 +954,36 @@ impl LibraryEngine {
                         "searchMessagesFilterAudio"
                     } else { "searchMessagesFilterDocument" }}
                 }),
-                Job::Refresh { chat, message } => json!({
+                Job::Refresh { chat, message } | Job::Backfill { chat, message } => json!({
                     "@type":"getMessage", "chat_id":chat, "message_id":message
+                }),
+                Job::Cover { file_id, .. } => json!({
+                    "@type":"downloadFile", "file_id":file_id, "priority":1,
+                    "offset":0, "limit":0, "synchronous":false
                 }),
             };
             let extra = td.next_request_id();
             let mut request = request;
             request["@extra"] = json!(extra);
             if td.send(&request).is_ok() {
+                if let Job::Cover {
+                    chat,
+                    message,
+                    file_id,
+                } = job
+                {
+                    self.cover_downloads
+                        .insert(file_id, (vec![(chat, message)], Instant::now()));
+                }
                 self.active.insert(extra, (job, Instant::now()));
             } else {
+                let artwork_only = matches!(job, Job::Cover { .. } | Job::Backfill { .. });
                 self.queued.push_front(job);
-                self.error =
-                    Some("Couldn't request Telegram music. Check the connection and retry.".into());
+                if !artwork_only {
+                    self.error = Some(
+                        "Couldn't request Telegram music. Check the connection and retry.".into(),
+                    );
+                }
                 self.publish();
                 break;
             }
@@ -683,20 +1001,173 @@ mod tests {
     fn parses_audio_document_and_fallbacks() {
         let audio = json!({"id":7,"date":10,"content":{"@type":"messageAudio","audio":{
             "file_name":"sample.mp3","title":" Persian  ","performer":"Artist","duration":90,
-            "album_cover_minithumbnail":{"data":"abc"}
+            "album_cover_minithumbnail":{"data":"abc"},
+            "album_cover_thumbnail":{"file":{"id":44}}
         }}});
         let track = parse_track(&audio).unwrap();
         assert_eq!(track.title, "Persian");
         assert_eq!(track.artist, "Artist");
         assert_eq!(track.cover_data.as_deref(), Some("abc"));
+        assert_eq!(cover_file_id(&audio), Some(44));
         let document = json!({"id":8,"date":11,"content":{"@type":"messageDocument","document":{
-            "mime_type":"audio/flac","file_name":"آهنگ.flac"
+            "mime_type":"audio/flac","file_name":"آهنگ.flac",
+            "minithumbnail":{"data":"mini"},"thumbnail":{"file":{"id":55}}
         }}});
         let track = parse_track(&document).unwrap();
         assert_eq!(track.title, "آهنگ");
         assert_eq!(track.artist, "Unknown artist");
         assert_eq!(track.media_type, "document");
+        assert_eq!(track.cover_data.as_deref(), Some("mini"));
+        assert_eq!(cover_file_id(&document), Some(55));
+        let external = json!({"content":{"@type":"messageAudio","audio":{
+            "external_album_covers":[{"file":{"id":66}}]
+        }}});
+        assert_eq!(cover_file_id(&external), Some(66));
         assert!(parse_track(&json!({"id":9,"content":{"@type":"messageVoiceNote"}})).is_none());
+    }
+
+    #[test]
+    fn thumbnail_completion_updates_library_and_survives_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "tunestash-cover-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("library.sqlite");
+        let source = SourceStore::open(&db).unwrap();
+        let chat = SourceChat {
+            chat_id: 42,
+            title: "Music".into(),
+            subtitle: String::new(),
+            kind: SourceKind::OtherChat,
+            selected: true,
+            music: MusicCheck::Found,
+        };
+        source.set_selected(7, &chat, true).unwrap();
+        let mut store = LibraryStore::open(&db).unwrap();
+        store.start_source(7, 42, false).unwrap();
+        let track = parse_track(&json!({"id":9,"date":1,"content":{"@type":"messageAudio",
+            "audio":{"file_name":"nine.mp3"}}}))
+        .unwrap();
+        store
+            .save_page(7, 42, MediaFilter::Audio, 0, &[track])
+            .unwrap();
+        store
+            .save_page(7, 42, MediaFilter::Document, 0, &[])
+            .unwrap();
+        drop(store);
+        let (updates, receiver) = watch::channel(LibrarySnapshot::default());
+        let (search_updates, _) = watch::channel(SearchSnapshot::default());
+        let mut engine = LibraryEngine::new(db.to_str().unwrap(), updates, search_updates);
+        engine.sync_sources(&SourceSnapshot {
+            account_id: Some(7),
+            setup_complete: true,
+            chats: vec![chat],
+            ..Default::default()
+        });
+        engine.queue_cover(42, 9, 88);
+        engine.drive(&TdJson);
+        let extra = *engine
+            .active
+            .iter()
+            .find(|(_, (job, _))| matches!(job, Job::Cover { file_id: 88, .. }))
+            .unwrap()
+            .0;
+        assert!(
+            engine.handle_response(&json!({"@extra":extra,"@type":"file","id":88,
+            "local":{"is_downloading_completed":false}}))
+        );
+        let png = root.join("cover.png");
+        std::fs::write(&png, STANDARD.decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=").unwrap()).unwrap();
+        engine.observe_file(&json!({"@type":"updateFile","file":{"id":88,
+            "local":{"is_downloading_completed":true,"path":png}}}));
+        assert!(
+            receiver.borrow().tracks[0]
+                .cover_data
+                .as_ref()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
+        drop(engine);
+        let reopened = LibraryStore::open(&db).unwrap();
+        assert_eq!(reopened.artwork_quality(7, 42, 9).unwrap(), 2);
+        assert!(
+            reopened.page(7, 10, None).unwrap().0[0]
+                .cover_data
+                .is_some()
+        );
+        drop(reopened);
+        drop(source);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backfill_pages_reach_tracks_beyond_the_first_batch() {
+        let root =
+            std::env::temp_dir().join(format!("tunestash-cover-backfill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("library.sqlite");
+        let source = SourceStore::open(&db).unwrap();
+        let chat = SourceChat {
+            chat_id: 42,
+            title: "Music".into(),
+            subtitle: String::new(),
+            kind: SourceKind::OtherChat,
+            selected: true,
+            music: MusicCheck::Found,
+        };
+        source.set_selected(7, &chat, true).unwrap();
+        let mut store = LibraryStore::open(&db).unwrap();
+        store.start_source(7, 42, false).unwrap();
+        let tracks: Vec<_> = (1..=201)
+            .map(|id| TrackInput {
+                message_id: id,
+                date: id,
+                media_type: "audio",
+                title: format!("Song {id}"),
+                artist: "Artist".into(),
+                filename: format!("{id}.mp3"),
+                duration_seconds: None,
+                cover_data: None,
+            })
+            .collect();
+        store
+            .save_page(7, 42, MediaFilter::Audio, 0, &tracks)
+            .unwrap();
+        store
+            .save_page(7, 42, MediaFilter::Document, 0, &[])
+            .unwrap();
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute("UPDATE indexed_tracks SET cover_checked=0", [])
+            .unwrap();
+        drop(store);
+        let (updates, _) = watch::channel(LibrarySnapshot::default());
+        let (search_updates, _) = watch::channel(SearchSnapshot::default());
+        let mut engine = LibraryEngine::new(db.to_str().unwrap(), updates, search_updates);
+        engine.sync_sources(&SourceSnapshot {
+            account_id: Some(7),
+            setup_complete: true,
+            chats: vec![chat],
+            ..Default::default()
+        });
+        assert_eq!(engine.queued.len(), BACKFILL_PAGE_SIZE);
+        engine.queued.clear();
+        engine.queue_backfill_page();
+        assert_eq!(engine.queued.len(), 1);
+        assert!(matches!(
+            engine.queued.front(),
+            Some(Job::Backfill { message: 201, .. })
+        ));
+        drop(engine);
+        drop(source);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

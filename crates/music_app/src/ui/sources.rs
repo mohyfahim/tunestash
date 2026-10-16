@@ -275,7 +275,7 @@ fn SourceRow(chat: SourceChat, compact: bool) -> Element {
                 onclick: move |_| { dispatch(SourceCommand::SetSelected { chat_id, selected: !selected }, error); },
                 if compact {
                     svg { view_box: "0 0 24 24", fill: "none",
-                        if selected { path { d: "m5 12 4 4L19 6" } }
+                        if selected { path { d: "M6 6l12 12M18 6 6 18" } }
                         else { path { d: "M12 5v14M5 12h14" } }
                     }
                 }

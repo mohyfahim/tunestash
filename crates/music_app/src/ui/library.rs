@@ -35,10 +35,7 @@ fn TrackRow(
     stream_only: bool,
     on_play: EventHandler<TrackKey>,
 ) -> Element {
-    let cover = track
-        .cover_data
-        .as_ref()
-        .map(|data| format!("data:image/jpeg;base64,{data}"));
+    let cover = track.cover_data.as_ref().map(|data| super::cover_src(data));
     rsx! {
         li { class: "library-track", key: "{track.chat_id}-{track.message_id}",
             button { class: "library-track-open", r#type: "button", aria_label: format!("Play {} by {}", track.title, track.artist),

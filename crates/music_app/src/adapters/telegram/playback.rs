@@ -130,6 +130,22 @@ impl PlaybackEngine {
         self.updates.send_replace(self.state.clone());
     }
 
+    pub fn apply_artwork_updates(&mut self, updates: Vec<(TrackKey, String)>) {
+        let mut changed = false;
+        for (key, data) in updates {
+            for track in &mut self.state.queue {
+                if track.key == key && track.cover_data.as_deref() != Some(&data) {
+                    track.cover_data = Some(data.clone());
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.persist();
+            self.publish();
+        }
+    }
+
     fn persist(&mut self) {
         if let Some(store) = &mut self.store {
             let _ = store.persist(&self.state);
@@ -913,7 +929,7 @@ impl PlaybackEngine {
         self.reads = pending;
     }
 
-    pub fn media_event(&mut self, td: &TdJson, value: &Value) -> bool {
+    pub fn media_event(&mut self, td: &TdJson, library: &mut LibraryEngine, value: &Value) -> bool {
         let mut persist = true;
         let mut history_changed = false;
         match value["type"].as_str().unwrap_or("") {
@@ -963,6 +979,11 @@ impl PlaybackEngine {
                     return false;
                 };
                 self.state.artwork_data = Some(data.to_string());
+                if let Some(key) = self.state.current_key()
+                    && let Some(preview) = value["library_data"].as_str()
+                {
+                    library.save_embedded_art(key.account_id, key.chat_id, key.message_id, preview);
+                }
                 persist = false;
             }
             "ended" => {
@@ -1011,7 +1032,7 @@ impl PlaybackEngine {
         }
     }
 
-    pub fn tick(&mut self, td: &TdJson) {
+    pub fn tick(&mut self, td: &TdJson, library: &mut LibraryEngine) {
         let mut active_workers = Vec::new();
         for worker in self.copy_workers.drain(..) {
             if worker.is_finished() {
@@ -1075,6 +1096,14 @@ impl PlaybackEngine {
                         .as_ref()
                         .is_some_and(|store| store.save_file(key, &path, size).is_ok());
                     if saved {
+                        if let Ok(Some(cover)) = media::extract_artwork(&path) {
+                            library.save_embedded_art(
+                                key.account_id,
+                                key.chat_id,
+                                key.message_id,
+                                &cover,
+                            );
+                        }
                         self.refresh_storage();
                         if self.state.current_key() == Some(key) {
                             self.state.download = DownloadStatus::Saved;
@@ -1301,6 +1330,63 @@ mod tests {
     use music_core::domain::LibrarySnapshot;
 
     #[test]
+    fn artwork_update_refreshes_current_queue_and_persists_it() {
+        let root =
+            std::env::temp_dir().join(format!("tunestash-queue-cover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("sources.sqlite");
+        SourceStore::open(&db).unwrap();
+        let (playback_tx, receiver) = watch::channel(PlaybackSnapshot::default());
+        let (storage_tx, _) = watch::channel(StorageSnapshot::default());
+        let mut engine = PlaybackEngine::new(
+            db.to_str().unwrap(),
+            root.to_str().unwrap(),
+            playback_tx,
+            storage_tx,
+        );
+        let key = TrackKey {
+            account_id: 1,
+            chat_id: 2,
+            message_id: 3,
+        };
+        engine.set_account(Some(1));
+        engine.state.load_queue(
+            vec![QueueTrack {
+                key,
+                title: "505".into(),
+                artist: "Arctic Monkeys".into(),
+                filename: "505.mp3".into(),
+                duration_seconds: Some(60),
+                cover_data: None,
+            }],
+            key,
+        );
+        engine.persist();
+        let cover = "data:image/jpeg;base64,ZmFrZQ==".to_string();
+        engine.apply_artwork_updates(vec![(key, cover.clone())]);
+        assert_eq!(
+            receiver.borrow().current().unwrap().cover_data.as_deref(),
+            Some(cover.as_str())
+        );
+        assert_eq!(
+            engine
+                .store
+                .as_ref()
+                .unwrap()
+                .restore(1)
+                .unwrap()
+                .current()
+                .unwrap()
+                .cover_data
+                .as_deref(),
+            Some(cover.as_str())
+        );
+        drop(engine);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn logout_reports_file_cleanup_failure_and_can_retry() {
         let root = std::env::temp_dir().join(format!("tunestash-logout-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1366,6 +1452,9 @@ mod tests {
         std::fs::create_dir_all(&files).unwrap();
         let db = root.join("files/sources.sqlite");
         SourceStore::open(&db).unwrap();
+        let (library_tx, _) = watch::channel(LibrarySnapshot::default());
+        let (search_tx, _) = watch::channel(music_core::domain::SearchSnapshot::default());
+        let mut library = LibraryEngine::new(db.to_str().unwrap(), library_tx, search_tx);
         let source = files.join("audio.bin");
         std::fs::write(&source, b"audio bytes").unwrap();
         let (playback_tx, _) = watch::channel(PlaybackSnapshot::default());
@@ -1385,7 +1474,7 @@ mod tests {
         let file = json!({"id":42,"size":11,"local":{"path":source,"download_offset":0,
             "downloaded_prefix_size":11,"is_downloading_completed":true}});
         engine.update_file(key, &file);
-        engine.tick(&TdJson);
+        engine.tick(&TdJson, &mut library);
         assert!(
             engine
                 .store
@@ -1395,12 +1484,9 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let (library_tx, _) = watch::channel(LibrarySnapshot::default());
-        let (search_tx, _) = watch::channel(music_core::domain::SearchSnapshot::default());
-        let library = LibraryEngine::new(db.to_str().unwrap(), library_tx, search_tx);
         engine.command(&TdJson, &library, PlaybackCommand::DownloadTrack(key));
         for _ in 0..100 {
-            engine.tick(&TdJson);
+            engine.tick(&TdJson, &mut library);
             if engine
                 .store
                 .as_ref()
@@ -1497,6 +1583,9 @@ mod tests {
         std::fs::create_dir_all(root.join("files/tdlib/files")).unwrap();
         let db = root.join("files/sources.sqlite");
         SourceStore::open(&db).unwrap();
+        let (library_tx, _) = watch::channel(LibrarySnapshot::default());
+        let (search_tx, _) = watch::channel(music_core::domain::SearchSnapshot::default());
+        let mut library = LibraryEngine::new(db.to_str().unwrap(), library_tx, search_tx);
         let (playback_tx, _) = watch::channel(PlaybackSnapshot::default());
         let (storage_tx, _) = watch::channel(StorageSnapshot::default());
         let mut engine = PlaybackEngine::new(
@@ -1527,7 +1616,7 @@ mod tests {
             .copy_tx
             .send((key, stale, Ok((copied.clone(), 5))))
             .unwrap();
-        engine.tick(&TdJson);
+        engine.tick(&TdJson, &mut library);
         assert!(!copied.exists());
         assert!(
             engine

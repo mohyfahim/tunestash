@@ -131,14 +131,21 @@ impl LibraryStore {
                 .prepare(
                     "INSERT INTO indexed_tracks
                      (account_id, chat_id, message_id, media_type, message_date, title,
-                      artist, filename, duration_seconds, cover_data, scan_generation,
+                      artist, filename, duration_seconds, cover_data, scan_generation, cover_checked, cover_quality,
                       search_title, search_artist, search_filename)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1,
+                       CASE WHEN ?10 IS NOT NULL THEN 1 ELSE 0 END, ?12, ?13, ?14)
                      ON CONFLICT(account_id, chat_id, message_id) DO UPDATE SET
                       media_type = excluded.media_type, message_date = excluded.message_date,
                       title = excluded.title, artist = excluded.artist,
                       filename = excluded.filename, duration_seconds = excluded.duration_seconds,
-                      cover_data = excluded.cover_data, scan_generation = excluded.scan_generation,
+                      cover_data = CASE WHEN excluded.cover_data IS NOT NULL
+                        AND indexed_tracks.cover_quality < 1 THEN excluded.cover_data
+                        ELSE indexed_tracks.cover_data END,
+                      cover_quality = MAX(indexed_tracks.cover_quality,
+                        CASE WHEN excluded.cover_data IS NOT NULL THEN 1 ELSE 0 END),
+                      scan_generation = excluded.scan_generation,
+                      cover_checked = 1,
                       search_title = excluded.search_title, search_artist = excluded.search_artist,
                       search_filename = excluded.search_filename",
                 )
@@ -209,14 +216,20 @@ impl LibraryStore {
             .execute(
                 "INSERT INTO indexed_tracks
              (account_id, chat_id, message_id, media_type, message_date, title, artist,
-              filename, duration_seconds, cover_data, scan_generation,
+              filename, duration_seconds, cover_data, scan_generation, cover_checked, cover_quality,
               search_title, search_artist, search_filename)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1,
+               CASE WHEN ?10 IS NOT NULL THEN 1 ELSE 0 END, ?12, ?13, ?14)
              ON CONFLICT(account_id, chat_id, message_id) DO UPDATE SET
               media_type=excluded.media_type, message_date=excluded.message_date,
               title=excluded.title, artist=excluded.artist, filename=excluded.filename,
-              duration_seconds=excluded.duration_seconds, cover_data=excluded.cover_data,
-              scan_generation=excluded.scan_generation,
+              duration_seconds=excluded.duration_seconds,
+              cover_data=CASE WHEN excluded.cover_data IS NOT NULL
+                AND indexed_tracks.cover_quality < 1 THEN excluded.cover_data
+                ELSE indexed_tracks.cover_data END,
+              cover_quality=MAX(indexed_tracks.cover_quality,
+                CASE WHEN excluded.cover_data IS NOT NULL THEN 1 ELSE 0 END),
+              scan_generation=excluded.scan_generation, cover_checked=1,
               search_title=excluded.search_title, search_artist=excluded.search_artist,
               search_filename=excluded.search_filename",
                 params![
@@ -245,6 +258,70 @@ impl LibraryStore {
             "DELETE FROM indexed_tracks WHERE account_id = ?1 AND chat_id = ?2 AND message_id = ?3",
             params![account, chat, message],
         ).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    pub fn save_artwork(
+        &self,
+        account: i64,
+        chat: i64,
+        message: i64,
+        data: &str,
+        quality: i64,
+    ) -> Result<bool, String> {
+        if !(2..=3).contains(&quality) || data.len() > 700_000 || !data.starts_with("data:image/") {
+            return Err("Invalid artwork".into());
+        }
+        self.connection
+            .execute(
+                "UPDATE indexed_tracks SET cover_data=?4, cover_quality=?5, cover_checked=1
+             WHERE account_id=?1 AND chat_id=?2 AND message_id=?3 AND cover_quality < ?5",
+                params![account, chat, message, data, quality],
+            )
+            .map(|changed| changed > 0)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn artwork_quality(&self, account: i64, chat: i64, message: i64) -> Result<i64, String> {
+        self.connection.query_row(
+            "SELECT cover_quality FROM indexed_tracks WHERE account_id=?1 AND chat_id=?2 AND message_id=?3",
+            params![account, chat, message], |row| row.get(0),
+        ).optional().map(|value| value.unwrap_or(0)).map_err(|error| error.to_string())
+    }
+
+    pub fn mark_artwork_checked(
+        &self,
+        account: i64,
+        chat: i64,
+        message: i64,
+    ) -> Result<(), String> {
+        self.connection.execute(
+            "UPDATE indexed_tracks SET cover_checked=1 WHERE account_id=?1 AND chat_id=?2 AND message_id=?3",
+            params![account, chat, message],
+        ).map(|_| ()).map_err(|error| error.to_string())
+    }
+
+    pub fn missing_artwork(
+        &self,
+        account: i64,
+        after_rowid: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, i64, i64)>, String> {
+        let mut stmt = self
+            .connection
+            .prepare(
+                "SELECT t.rowid, t.chat_id, t.message_id FROM indexed_tracks AS t
+             JOIN source_choices AS s ON s.account_id=t.account_id AND s.chat_id=t.chat_id
+             WHERE t.account_id=?1 AND s.enabled=1 AND t.cover_quality<2 AND t.cover_checked=0
+               AND t.rowid > ?2
+             ORDER BY t.rowid LIMIT ?3",
+            )
+            .map_err(|error| error.to_string())?;
+        stmt.query_map(params![account, after_rowid, limit as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|error| error.to_string())
     }
 
     pub fn page(
@@ -511,6 +588,7 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        let _ = std::fs::remove_file(&path);
         let source = SourceStore::open(&path).unwrap();
         source
             .set_selected(
@@ -540,6 +618,39 @@ mod tests {
             duration_seconds: Some(60),
             cover_data: None,
         }
+    }
+
+    #[test]
+    fn richer_cover_survives_reindex_and_restart() {
+        let (path, mut library) = fixture();
+        library.start_source(1, 10, false).unwrap();
+        let mut first = track(5);
+        first.cover_data = Some("preview".into());
+        library
+            .save_page(1, 10, MediaFilter::Audio, 0, &[first])
+            .unwrap();
+        assert_eq!(library.artwork_quality(1, 10, 5).unwrap(), 1);
+        let full = "data:image/jpeg;base64,ZmFrZQ==";
+        assert!(library.save_artwork(1, 10, 5, full, 3).unwrap());
+        assert!(
+            !library
+                .save_artwork(1, 10, 5, "data:image/png;base64,AA==", 2)
+                .unwrap()
+        );
+        library.start_source(1, 10, true).unwrap();
+        library
+            .save_page(1, 10, MediaFilter::Audio, 0, &[track(5)])
+            .unwrap();
+        drop(library);
+        let library = LibraryStore::open(&path).unwrap();
+        assert_eq!(library.artwork_quality(1, 10, 5).unwrap(), 3);
+        assert_eq!(
+            library.page(1, 10, None).unwrap().0[0]
+                .cover_data
+                .as_deref(),
+            Some(full)
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

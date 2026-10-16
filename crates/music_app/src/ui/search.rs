@@ -29,10 +29,7 @@ fn SearchTrackRow(
                 && !normalize_search(&track.title).contains(term)
                 && !normalize_search(&track.artist).contains(term)
         });
-    let cover = track
-        .cover_data
-        .as_ref()
-        .map(|data| format!("data:image/jpeg;base64,{data}"));
+    let cover = track.cover_data.as_ref().map(|data| super::cover_src(data));
     let key = TrackKey {
         account_id,
         chat_id: track.chat_id,

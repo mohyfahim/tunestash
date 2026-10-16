@@ -370,6 +370,7 @@ impl Driver {
             self.handle_state(&value["authorization_state"]);
             return;
         }
+        self.library.observe_file(&value);
         self.library.observe_update(&value);
         if self.playback.handle_value(&self.td, &value) {
             return;
@@ -652,7 +653,10 @@ pub fn run(
                     .playback
                     .read_range(&driver.td, key, offset, length, response),
                 DriverCommand::MediaEvent(value) => {
-                    if driver.playback.media_event(&driver.td, &value) {
+                    if driver
+                        .playback
+                        .media_event(&driver.td, &mut driver.library, &value)
+                    {
                         driver.library.refresh_recent_plays();
                     }
                 }
@@ -672,7 +676,10 @@ pub fn run(
         );
         driver.library.drive(&driver.td);
         driver.playback.reconcile(&driver.library);
-        driver.playback.tick(&driver.td);
+        driver.playback.tick(&driver.td, &mut driver.library);
+        driver
+            .playback
+            .apply_artwork_updates(driver.library.take_artwork_updates());
     }
 }
 
