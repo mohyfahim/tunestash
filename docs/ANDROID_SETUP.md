@@ -76,3 +76,52 @@ local TDLib database key. Host tests do not prove a real account login; verify
 that separately on an Android device.
 The Cargo binary is named `TuneStash` because Dioxus derives the Android
 launcher label from that name.
+
+## Shareable ARM64 release APK
+
+Use the same prerequisites and `.env` as the debug build. Initialize the release
+signing key once, then build an APK for direct installation by testers:
+
+```sh
+./scripts/build-android-release.sh --init-key
+./scripts/build-android-release.sh --version-code 1
+```
+
+The first command creates `release.p12` and `release.pass` under
+`~/.local/share/tunestash/` (or `$XDG_DATA_HOME/tunestash/`). Both files are
+outside this repository, restricted to your user account, and required for
+future APK updates. Back up **both** securely before distributing the first
+APK. The script refuses to replace an existing key. To use different paths,
+set `TUNESTASH_RELEASE_KEYSTORE` and `TUNESTASH_RELEASE_PASSWORD_FILE`.
+The password file is kept beside the key for unattended local builds, so
+protect the directory and its backups together. Do not share either file with
+testers. Only the APK and optional `.sha256` checksum go to them.
+
+The build writes `dist/TuneStash-<version>-<version-code>-arm64-v8a.apk` and a
+matching `.sha256` file. It uses the Cargo workspace version as Android
+`versionName`. Increase `--version-code` for every subsequent build sent to
+testers; keep the package ID and signing key the same so Android accepts
+updates. The script checks the APK signature, alignment, non-debuggable
+manifest, version, archive integrity, and bundled native libraries before
+placing it in `dist/`. The release profile and Android code/resource shrinking
+reduce size while preserving JNI entry points and the app's fonts and images.
+Verify the checksum from the output directory with
+`cd dist && sha256sum -c TuneStash-0.1.0-1-arm64-v8a.apk.sha256`.
+The generated Gradle project's release lint task is disabled because its
+`lint-gradle:31.7.0` dependency did not resolve in this build environment;
+Rust checks and the artifact checks above still run separately.
+
+Testers can open the APK on an ARM64 Android device and permit installation
+from their chosen file-sharing app, or install it over USB with:
+
+```sh
+adb install -r dist/TuneStash-0.1.0-1-arm64-v8a.apk
+```
+
+The release APK has the same `com.tunestash.app` package ID as the debug APK
+but a different signing key. Android cannot install it over an existing debug
+installation. Uninstalling the debug app first removes its local Telegram
+session, library, and downloads; Telegram messages remain on Telegram.
+The app currently supports ARM64 devices only. Confirm sign-in, a selected
+source, playback, and background media controls on a real device before
+sharing a build as device-verified.

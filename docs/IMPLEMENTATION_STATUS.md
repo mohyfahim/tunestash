@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated: 2026-10-15
+Updated: 2026-10-16
 
 ## Implemented
 
@@ -392,6 +392,30 @@ screen. At that checkpoint, the device's TuneStash
 account was signed out during the approved cleanup check; using the app again
 requires a new Telegram sign-in. No phone number or verification code was
 entered after sign-out.
+
+## Tester APK release build
+
+- Added an ARM64 release builder with a shared native/resource overlay, Rust
+  size optimizations, Android code/resource shrinking, signing-key setup, and
+  signed APK integrity, alignment, package, and ABI checks. The local release
+  key and password file are outside the repository and must both be backed up.
+- The first signed APK, version 0.1.0 (code 1), is 18,500,460 bytes (17.64 MiB)
+  compared with the previous debug APK's 129,812,200 bytes (123.80 MiB).
+  TDLib is the largest remaining APK entry. The release Rust library has no
+  debug sections; its required JNI exports and R8-preserved Kotlin methods
+  were inspected. Signature v2/v3, archive integrity, alignment, and checksum
+  verification pass.
+- Host formatting, workspace check, Clippy, and 73 unit tests pass. Android's
+  generated release lint task was disabled after it failed to resolve
+  `lint-gradle:31.7.0`; it is not counted as a completed lint check. Android
+  target Clippy with warnings denied reports three existing app-code lints
+  (one long argument list and two checked-division suggestions). On the Samsung
+  SM-A256E (Android 14), Android first rejected an update over the debug-signed
+  package with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`. With owner approval, the
+  debug app was removed from Android user 0 and the signed release APK installed.
+  A cold launch rendered the welcome screen, and Continue opened the phone
+  entry form without a crash. No Telegram credentials were entered; live sign-in,
+  playback, and background media controls remain unverified in the release APK.
 
 ## Launcher, source control, and library artwork increment
 

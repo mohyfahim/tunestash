@@ -10,4 +10,5 @@
 
 # Rust
 /target/
+/dist/
 **/*.rs.bk
