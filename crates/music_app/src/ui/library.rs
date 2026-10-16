@@ -1,4 +1,5 @@
 use crate::runtime::AuthService;
+use crate::ui::account::AccountView;
 use crate::ui::home::HomeView;
 use crate::ui::player::{MiniPlayer, PlayerView};
 use crate::ui::search::SearchView;
@@ -24,6 +25,7 @@ enum Utility {
     None,
     Settings,
     Storage,
+    Account,
 }
 
 #[component]
@@ -74,6 +76,7 @@ pub fn LibraryView(
     search: SearchSnapshot,
     playback: PlaybackSnapshot,
     storage: StorageSnapshot,
+    source: music_core::domain::SourceSnapshot,
     initial_settings: bool,
     on_open_sources: EventHandler<()>,
 ) -> Element {
@@ -95,12 +98,15 @@ pub fn LibraryView(
             } else if *utility.read() == Utility::Settings {
                 SettingsView { on_back: move |_| { utility.set(Utility::None); tab.set(Tab::Home); },
                     on_sources: move |_| on_open_sources.call(()),
+                    on_account: move |_| utility.set(Utility::Account),
                     on_storage: move |_| {
                         if let Ok(service) = AuthService::global() { let _ = service.submit_storage(StorageCommand::Refresh); }
                         utility.set(Utility::Storage);
                     } }
             } else if *utility.read() == Utility::Storage {
                 StorageView { snapshot: storage.clone(), on_back: move |_| utility.set(Utility::Settings) }
+            } else if *utility.read() == Utility::Account {
+                AccountView { snapshot: source.clone(), on_back: move |_| utility.set(Utility::Settings) }
             } else if is_library {
                 main { class: "library-screen",
                     header { class: "library-header",
@@ -221,6 +227,12 @@ pub fn LibraryView(
                             let _ = service.submit_library(LibraryCommand::SetSort(LibrarySort::Recent));
                         }
                         tab.set(Tab::Library);
+                    },
+                    on_play: move |key| {
+                        if let Ok(service) = AuthService::global() {
+                            let _ = service.submit_playback(PlaybackCommand::PlayLibrary { key, sort: LibrarySort::Recent });
+                            show_player.set(true);
+                        }
                     },
                 }
             } else {

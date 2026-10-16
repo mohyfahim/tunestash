@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated: 2026-10-14
+Updated: 2026-10-15
 
 ## Implemented
 
@@ -14,6 +14,23 @@ Updated: 2026-10-14
   searchable history, following TDLib pagination. Voice notes, links, and
   text-only messages do not qualify. Only confirmed music sources appear in
   Default Sources, Selected Chats, or searchable All Chats.
+- Source discovery now shows a lime progress bar during music checks and an
+  indeterminate bar while Telegram loads chats. Default Sources shows its actual
+  count and every discovered default source, rather than initially hiding all
+  but five. Setup can continue as soon as one playable source is found; the
+  full scan continues in the service runtime and is still required before its
+  completed catalog is saved.
+- Private chats are checked for music before looking up their user type, so
+  empty chats no longer need that extra Telegram request. Found bot and
+  channel chats are classified promptly. Classification failures retry twice,
+  then appear as a retryable discovery gap instead of silently saving an
+  incomplete source type.
+- The updated debug APK installed on Samsung SM-A256E (Android 14). The source
+  page displayed all six default sources. A manual resync showed the lime bar
+  at 99 of 620 chats checked and completed at 635 of 635 with no failed checks;
+  the page again displayed six default sources. This verifies the resync UI and
+  classification outcome on that account. A fresh-account first scan has not
+  been timed on the device.
 - Main and Archive chat loading discovers candidates, including archived
   chats. The candidate IDs come from TDLib's `getChats` results for those two
   lists; other cached chat objects are excluded. Some accessible channels on
@@ -39,7 +56,8 @@ Updated: 2026-10-14
   Logout removes the marker, and a failed save keeps Sources visible.
 - A Change account confirmation starts TDLib logout, clears the account's
   source choices after TDLib closes, and creates a fresh TDLib client for the
-  next login. It is only exposed during onboarding.
+  next login. The later Account increment exposes this action from Settings
+  and expands cleanup to all connected-account data.
 - Native TDLib C/JSON bridge on a dedicated Rust thread. Android Keystore wraps
   the local TDLib database key; app files remain under Android private storage.
 - TuneStash launcher icon and Android splash resources, overlaid during the APK
@@ -324,3 +342,53 @@ on the service thread; Dioxus consumes immutable search snapshots and never
 queries SQLite during rendering. Search currently scans normalized fields
 within the selected account rather than using full-text indexing, so very
 large-library query latency has not been measured.
+
+## Typography, listening history, and account increment
+
+- JetBrains Mono is bundled for Latin interface text; Vazirmatn supplies
+  Persian and Arabic glyphs. The generated lime and graphite Telegram-plane
+  and music-note mark appears on welcome, login, Sources, launcher, and splash.
+  Track artwork continues to use the music-note fallback.
+- The unselected player heart uses theme gray. Song and Queue share a pinned
+  seek and transport footer above the Android navigation safe area; artwork,
+  metadata, secondary actions, and the queue scroll independently.
+- SQLite v8 stores recent plays by account and track identity. A track enters
+  history after Media3 reports actual playback; replaying it moves it to the
+  front. Home shows up to 12 available tracks from enabled sources, including
+  previously completed plays, and tapping one starts it from the beginning.
+- Settings has an Account page with Telegram name, username, and profile photo
+  or initials. Its confirmation explains the local data removed by sign-out.
+  Playback and transfers stop before TDLib logout. After TDLib closes, the app
+  removes account SQLite rows, offline media, TDLib files and cache, and the
+  old encrypted database key. A persistent pending marker supports cleanup
+  after interruption; cleanup failure blocks sign-in and offers Retry.
+
+Formatting, 68 workspace tests, host Clippy, Android ARM64 Rust check, and the
+SDK 35 APK build pass. The APK contains both fonts, the new logo, launcher and
+splash resources, and TDLib. Host tests cover history order, replay, account
+and source filtering, migration, profile-photo fallback, and an offline cleanup
+failure followed by retry.
+
+Samsung SM-A256E, Android 14: the updated APK installed over the existing
+session. JetBrains Mono and mixed Persian/English track text rendered without
+clipping at the phone's normal 1080 px width. The Song and Queue footer stayed
+at the bottom while the Queue scrolled; the inactive heart was gray. Playing
+“505” for several seconds put it in Continue Listening, and a cold relaunch
+kept the entry. Account displayed the live profile name, username, and photo;
+the sign-out confirmation fit the screen. Sign-out returned to welcome, and
+`files/tdlib` fell from 61,099 KiB to 366 KiB for the new empty session. The
+offline directory was empty. Welcome and login with the new mark fit at a
+temporary 960 px width; the original display size was restored.
+
+A direct post-logout SQLite row count on the phone was not run: automatic
+approval review rejected exporting the private app database to the host for
+that check. Account-row deletion is covered by host tests; the device check
+used directory size and offline-folder contents instead.
+
+The following checks remain unverified on a device: the new player footer at
+960 px width, an actual completed track in history, profile initials when no
+photo exists, the Android launcher and splash appearance (the APK resources
+were inspected), and the cleanup failure/Retry screen. The device's TuneStash
+account was signed out during the approved cleanup check; using the app again
+requires a new Telegram sign-in. No phone number or verification code was
+entered after sign-out.

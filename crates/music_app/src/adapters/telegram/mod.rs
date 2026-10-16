@@ -43,6 +43,7 @@ use crate::runtime::DriverCommand;
 #[cfg(target_os = "android")]
 use std::{
     ffi::{CStr, CString, c_char},
+    path::PathBuf,
     sync::mpsc::Receiver,
 };
 #[cfg(target_os = "android")]
@@ -276,6 +277,44 @@ struct Driver {
 
 #[cfg(target_os = "android")]
 impl Driver {
+    fn logout_marker(&self) -> PathBuf {
+        std::path::Path::new(&self.config.source_db).with_file_name("logout.pending")
+    }
+
+    fn finish_logout(&mut self) -> Result<(), String> {
+        let account = self.logout_pending.ok_or("No pending account cleanup")?;
+        self.playback.finish_logout(account)?;
+        self.sources.clear_account_data(account)?;
+        for directory in [&self.config.database_dir, &self.config.files_dir] {
+            match std::fs::remove_dir_all(directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("Could not clear Telegram storage: {error}")),
+            }
+        }
+        crate::adapters::secure_store::clear_tdlib_key()?;
+        self.config.database_key = crate::adapters::secure_store::android_storage()?.database_key;
+        std::fs::create_dir_all(&self.config.database_dir)
+            .map_err(|error| format!("Could not prepare Telegram storage: {error}"))?;
+        std::fs::create_dir_all(&self.config.files_dir)
+            .map_err(|error| format!("Could not prepare Telegram storage: {error}"))?;
+        match std::fs::remove_file(self.logout_marker()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Could not finish local cleanup: {error}")),
+        }
+        self.td = TdJson::load()?;
+        self.td
+            .send(&json!({"@type":"getAuthorizationState", "@extra":-2}))?;
+        self.sources.signed_out();
+        self.library.reset();
+        self.logout_pending = None;
+        self.snapshot.stage = AuthStage::Connecting;
+        self.snapshot.error = None;
+        self.publish();
+        Ok(())
+    }
+
     fn publish(&self) {
         self.updates.send_replace(self.snapshot.clone());
     }
@@ -292,6 +331,20 @@ impl Driver {
     }
 
     fn handle_command(&mut self, command: AuthCommand) {
+        if command == AuthCommand::RetryCleanup {
+            if matches!(self.snapshot.stage, AuthStage::CleanupFailed { .. }) {
+                self.snapshot.stage = AuthStage::Connecting;
+                self.publish();
+                if let Err(error) = self.finish_logout() {
+                    self.snapshot.stage = AuthStage::CleanupFailed { description: error };
+                    self.publish();
+                }
+            }
+            return;
+        }
+        if self.logout_pending.is_some() {
+            return;
+        }
         if self.snapshot.busy {
             return;
         }
@@ -322,6 +375,10 @@ impl Driver {
             return;
         }
         if self.sources.handle_value(&self.td, &value) {
+            if self.logout_pending.is_some() && !self.sources.snapshot().signing_out {
+                self.logout_pending = None;
+                let _ = std::fs::remove_file(self.logout_marker());
+            }
             return;
         }
         if self.library.handle_response(&value) {
@@ -361,8 +418,18 @@ impl Driver {
     }
 
     fn handle_state(&mut self, state: &Value) {
+        if self.logout_pending.is_some()
+            && matches!(self.snapshot.stage, AuthStage::CleanupFailed { .. })
+        {
+            return;
+        }
         let kind = state["@type"].as_str().unwrap_or("");
         let client_closed = kind == "authorizationStateClosed";
+        if self.logout_pending.is_some() && !client_closed {
+            self.snapshot.stage = AuthStage::Connecting;
+            self.publish();
+            return;
+        }
         self.pending = None;
         self.snapshot.busy = false;
         self.snapshot.error = None;
@@ -422,19 +489,21 @@ impl Driver {
             _ => AuthStage::Unsupported { description:"Telegram requested an authentication step this version does not support.".into() },
         };
         self.publish();
-        if matches!(self.snapshot.stage, AuthStage::Phone) {
+        if matches!(self.snapshot.stage, AuthStage::Phone) && self.logout_pending.is_none() {
             self.sources.signed_out();
             self.library.reset();
-            if let Some(account) = self.logout_pending.take() {
-                self.playback.logout(account);
-            }
         }
         if client_closed {
+            if self.logout_pending.is_some() {
+                if let Err(error) = self.finish_logout() {
+                    self.snapshot.stage = AuthStage::CleanupFailed { description: error };
+                    self.publish();
+                }
+                return;
+            }
             self.sources.signed_out();
             self.library.reset();
-            if let Some(account) = self.logout_pending.take() {
-                self.playback.logout(account);
-            }
+            self.playback.set_account(None);
             match TdJson::load() {
                 Ok(td) => {
                     self.td = td;
@@ -509,17 +578,57 @@ pub fn run(
         playback,
         logout_pending: None,
     };
-    let _ = driver
-        .td
-        .send(&json!({"@type":"getAuthorizationState", "@extra":-2}));
+    match std::fs::read_to_string(driver.logout_marker()) {
+        Ok(contents) => match contents.trim().parse::<i64>() {
+            Ok(account) => {
+                driver.logout_pending = Some(account);
+                if let Err(error) = driver.finish_logout() {
+                    driver.snapshot.stage = AuthStage::CleanupFailed { description: error };
+                    driver.publish();
+                }
+            }
+            Err(_) => {
+                driver.snapshot.stage = AuthStage::Unsupported {
+                    description:
+                        "Local sign-out state is damaged. Clear this app's data to continue.".into(),
+                };
+                driver.publish();
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let _ = driver
+                .td
+                .send(&json!({"@type":"getAuthorizationState", "@extra":-2}));
+        }
+        Err(error) => {
+            driver.snapshot.stage = AuthStage::Unsupported {
+                description: format!("Cannot check local sign-out state: {error}"),
+            };
+            driver.publish();
+        }
+    }
     loop {
         while let Ok(command) = commands.try_recv() {
             match command {
                 DriverCommand::Auth(command) => driver.handle_command(command),
                 DriverCommand::Source(SourceCommand::ChangeAccount) => {
-                    driver.logout_pending = driver.sources.snapshot().account_id;
-                    let _ = crate::adapters::media::dispatch("stop", "{}");
-                    driver.sources.change_account(&driver.td);
+                    if let Some(account) = driver.sources.snapshot().account_id {
+                        if let Err(error) =
+                            std::fs::write(driver.logout_marker(), account.to_string())
+                        {
+                            driver
+                                .sources
+                                .logout_error(&format!("Cannot prepare local cleanup: {error}"));
+                            continue;
+                        }
+                        driver.logout_pending = Some(account);
+                        driver.playback.begin_logout(&driver.td);
+                        driver.sources.change_account(&driver.td);
+                        if !driver.sources.snapshot().signing_out {
+                            driver.logout_pending = None;
+                            let _ = std::fs::remove_file(driver.logout_marker());
+                        }
+                    }
                 }
                 DriverCommand::Source(command) => {
                     driver.sources.handle_command(&driver.td, command)
@@ -542,7 +651,11 @@ pub fn run(
                 } => driver
                     .playback
                     .read_range(&driver.td, key, offset, length, response),
-                DriverCommand::MediaEvent(value) => driver.playback.media_event(&driver.td, &value),
+                DriverCommand::MediaEvent(value) => {
+                    if driver.playback.media_event(&driver.td, &value) {
+                        driver.library.refresh_recent_plays();
+                    }
+                }
             }
         }
         if let Some(value) = driver.td.receive() {

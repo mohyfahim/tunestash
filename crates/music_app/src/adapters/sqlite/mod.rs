@@ -170,7 +170,7 @@ impl SourceStore {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version > 7 {
+        if version > 8 {
             return Err("Source database was created by a newer app version.".into());
         }
         connection
@@ -271,6 +271,22 @@ impl SourceStore {
         }
         if version < 7 {
             self::migrate_search(&connection)?;
+        }
+        if version < 8 {
+            connection
+                .execute_batch(
+                    "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS recent_plays (
+                   account_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+                   message_id INTEGER NOT NULL, played_order INTEGER NOT NULL,
+                   PRIMARY KEY(account_id, chat_id, message_id)
+                 );
+                 CREATE INDEX IF NOT EXISTS recent_plays_order
+                   ON recent_plays(account_id, played_order DESC);
+                 PRAGMA user_version = 8;
+                 COMMIT;",
+                )
+                .map_err(|error| error.to_string())?;
         }
         Ok(Self { connection })
     }
@@ -493,6 +509,7 @@ impl SourceStore {
             "playback_state",
             "storage_settings",
             "recent_searches",
+            "recent_plays",
         ] {
             transaction
                 .execute(
@@ -514,6 +531,32 @@ impl SourceStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_adds_listening_history_to_an_existing_database() {
+        let path = std::env::temp_dir().join(format!(
+            "tunestash-recent-migration-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        drop(SourceStore::open(&path).unwrap());
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE recent_plays; PRAGMA user_version = 7;")
+            .unwrap();
+        drop(connection);
+        drop(SourceStore::open(&path).unwrap());
+        let connection = Connection::open(&path).unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
+        connection
+            .execute("INSERT INTO recent_plays VALUES (1,2,3,1)", [])
+            .unwrap();
+        drop(connection);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn choices_survive_reopen_and_are_scoped_to_account() {
@@ -682,7 +725,7 @@ mod tests {
         let version: i64 = upgraded
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         drop(upgraded);
         let _ = std::fs::remove_file(path);
     }
@@ -731,7 +774,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         std::fs::remove_file(path).unwrap();
     }
 }

@@ -177,19 +177,16 @@ Examples:
 
 ## 5. Typography
 
-Recommended visual direction: neutral geometric sans-serif with strong legibility.
+The interface uses the bundled variable JetBrains Mono for Latin text and
+numerals. The bundled variable Vazirmatn supplies Persian and Arabic glyphs
+that JetBrains Mono does not contain. Keep `dir="auto"` on mixed-language
+metadata and allow longer labels to wrap where necessary.
 
-Suggested families:
-
-- Inter
-- SF Pro
-- Manrope
-- Geist
-
-For Persian text, pair with a high-legibility Persian/Arabic family such as:
-
-- Vazirmatn
-- Noto Sans Arabic
+The TuneStash brand mark pairs a Telegram-style paper plane with a music note
+inside an electric-lime rounded square. The generated transparent master is
+`crates/music_app/assets/tunestash-logo-v2.png`; use it for entry-screen,
+launcher, and splash branding. Track artwork fallbacks keep the separate
+music-note mark.
 
 ### Type scale
 

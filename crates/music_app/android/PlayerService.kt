@@ -46,6 +46,9 @@ class PlayerService : MediaSessionService() {
         fun getOrCreateTdlibKey(context: Context): String = MainActivity.getOrCreateTdlibKey(context)
 
         @JvmStatic
+        fun clearTdlibKey(context: Context) = MainActivity.clearTdlibKey(context)
+
+        @JvmStatic
         fun playerCommand(context: Context, action: String, payload: String) {
             val intent = Intent(context, PlayerService::class.java).apply {
                 putExtra("action", action)
@@ -100,7 +103,8 @@ class PlayerService : MediaSessionService() {
             .build()
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                nativeEvent(JSONObject().put("type", if (isPlaying) "playing" else "paused").toString())
+                nativeEvent(JSONObject().put("type", if (isPlaying) "playing" else "paused")
+                    .put("media_id", player.currentMediaItem?.mediaId ?: "").toString())
             }
             override fun onPlaybackStateChanged(state: Int) {
                 val kind = when (state) {

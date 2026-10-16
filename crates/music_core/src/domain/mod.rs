@@ -6,6 +6,9 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthStage {
     Connecting,
+    CleanupFailed {
+        description: String,
+    },
     Phone,
     Code {
         phone: String,
@@ -47,6 +50,7 @@ impl Default for AuthSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthCommand {
     Retry,
+    RetryCleanup,
     Phone(String),
     Code(String),
     ResendCode,
@@ -105,6 +109,8 @@ pub enum DiscoveryStage {
 pub struct SourceSnapshot {
     pub account_id: Option<i64>,
     pub account_name: String,
+    pub username: Option<String>,
+    pub profile_photo_data: Option<String>,
     pub stage: DiscoveryStage,
     pub checked_chats: usize,
     pub total_chats: usize,
@@ -122,6 +128,8 @@ impl Default for SourceSnapshot {
         Self {
             account_id: None,
             account_name: String::new(),
+            username: None,
+            profile_photo_data: None,
             stage: DiscoveryStage::Waiting,
             checked_chats: 0,
             total_chats: 0,
@@ -167,6 +175,7 @@ pub struct LibrarySnapshot {
     pub account_id: Option<i64>,
     pub tracks: Vec<TrackSummary>,
     pub recent_tracks: Vec<TrackSummary>,
+    pub recent_plays: Vec<TrackSummary>,
     pub total_count: usize,
     pub active_initial: Option<char>,
     pub sort: LibrarySort,

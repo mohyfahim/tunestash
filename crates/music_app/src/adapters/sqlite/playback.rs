@@ -7,6 +7,15 @@ pub struct PlaybackStore {
 }
 
 impl PlaybackStore {
+    pub fn record_play(&self, key: TrackKey) -> Result<(), String> {
+        self.connection.execute(
+            "INSERT INTO recent_plays(account_id,chat_id,message_id,played_order)
+             VALUES (?1,?2,?3,(SELECT COALESCE(MAX(played_order),0)+1 FROM recent_plays WHERE account_id=?1))
+             ON CONFLICT(account_id,chat_id,message_id) DO UPDATE SET played_order=excluded.played_order",
+            params![key.account_id,key.chat_id,key.message_id],
+        ).map(|_| ()).map_err(|error| error.to_string())
+    }
+
     pub fn open(path: &Path) -> Result<Self, String> {
         let connection = Connection::open(path).map_err(|e| e.to_string())?;
         connection

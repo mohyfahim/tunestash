@@ -35,6 +35,17 @@ establish a general performance guarantee. The remaining 20-second scan made
 884 Document requests and examined 7,866 Document messages; that is the main
 remaining work if further speedup is needed.
 
+The later first-scan change defers `getUser` until a private chat has proved it
+contains music, and lets setup continue while the complete scan runs. This
+should reduce cold-scan requests and time to an available library, but no
+fresh-account first scan has been timed after this change.
+
+A 2026-10-15 manual resync on the same Samsung model and account completed
+635 of 635 checks with no errors in 34 seconds and 1,685 requests. A prior
+logged warm resync of 635 chats took 21 seconds and 1,966 requests. The new
+run used fewer requests, but its longer wall time does not establish that
+complete scans finish faster. Neither run measures a fresh-account first scan.
+
 The source engine writes aggregate `TuneStashScan` entries to Android logcat:
 
 ```sh

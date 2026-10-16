@@ -5,6 +5,7 @@ pub fn SettingsView(
     on_back: EventHandler<()>,
     on_sources: EventHandler<()>,
     on_storage: EventHandler<()>,
+    on_account: EventHandler<()>,
 ) -> Element {
     rsx! {
         main { class: "utility-screen", aria_label: "Settings",
@@ -16,7 +17,7 @@ pub fn SettingsView(
                     }
                     h1 { "Settings" }
                 }
-                p { class: "utility-intro", "Choose where music comes from and how much space it uses." }
+                p { class: "utility-intro", "Manage your music, storage, and Telegram account." }
                 nav { class: "settings-list", aria_label: "Settings sections",
                     button { class: "settings-link", r#type: "button", onclick: move |_| on_sources.call(()),
                         span { class: "settings-link-icon violet", aria_hidden: "true",
@@ -30,6 +31,13 @@ pub fn SettingsView(
                             svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round", rect { x: "3", y: "5", width: "18", height: "14", rx: "2" } path { d: "M3 10h18m-5 5h2" } }
                         }
                         span { class: "settings-link-copy", strong { "Storage management" } small { "Downloads, cache and streaming" } }
+                        svg { class: "settings-chevron", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", path { d: "m9 5 7 7-7 7" } }
+                    }
+                    button { class: "settings-link", r#type: "button", onclick: move |_| on_account.call(()),
+                        span { class: "settings-link-icon violet", aria_hidden: "true",
+                            svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", circle { cx: "12", cy: "8", r: "4" } path { d: "M4 21a8 8 0 0 1 16 0" } }
+                        }
+                        span { class: "settings-link-copy", strong { "Account" } small { "Profile and sign out" } }
                         svg { class: "settings-chevron", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", path { d: "m9 5 7 7-7 7" } }
                     }
                 }

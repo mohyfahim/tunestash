@@ -1,5 +1,6 @@
 //! Welcome, Telegram authentication, and music source selection.
 
+mod account;
 mod home;
 mod library;
 mod player;
@@ -15,8 +16,10 @@ use music_core::{
     ports::TelegramAuth,
 };
 
-const NOTE: Asset = asset!("/assets/music-note.svg");
+const LOGO: Asset = asset!("/assets/tunestash-logo-v2.png");
 const WAVE: Asset = asset!("/assets/login-wave.svg");
+const JETBRAINS: Asset = asset!("/assets/fonts/JetBrainsMono-VariableFont_wght.ttf");
+const VAZIRMATN: Asset = asset!("/assets/fonts/Vazirmatn-variable.woff2");
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
@@ -27,6 +30,7 @@ enum Step {
     Password,
     Connecting,
     Unsupported,
+    CleanupFailed,
 }
 
 fn send(command: AuthCommand, mut error: Signal<Option<String>>) {
@@ -170,7 +174,9 @@ pub fn App() -> Element {
         _ => None,
     };
     let message = local_error.read().clone().or(current.error.clone());
-    let step = if *edit_phone.read() {
+    let step = if matches!(&current.stage, AuthStage::CleanupFailed { .. }) {
+        Step::CleanupFailed
+    } else if *edit_phone.read() {
         Step::Phone
     } else {
         match current.stage {
@@ -181,6 +187,7 @@ pub fn App() -> Element {
             AuthStage::Password { .. } => Step::Password,
             AuthStage::Connecting | AuthStage::Ready { .. } => Step::Connecting,
             AuthStage::Unsupported { .. } => Step::Unsupported,
+            AuthStage::CleanupFailed { .. } => Step::CleanupFailed,
         }
     };
     let (title, description, label, placeholder, input_type, autocomplete) = match &current.stage {
@@ -234,6 +241,14 @@ pub fn App() -> Element {
             "",
             "",
         ),
+        AuthStage::CleanupFailed { description } => (
+            "Finish clearing local data".into(),
+            format!("Sign out reached Telegram, but local cleanup did not finish. {description}"),
+            "",
+            "",
+            "",
+            "",
+        ),
         _ => (
             "Connecting to Telegram".into(),
             "Checking your secure session.".into(),
@@ -263,7 +278,12 @@ pub fn App() -> Element {
     };
     let busy = current.busy;
 
+    let font_faces = format!(
+        "@font-face {{ font-family: 'JetBrains Mono'; src: url('{JETBRAINS}') format('truetype'); font-style: normal; font-weight: 100 900; font-display: swap; }}
+         @font-face {{ font-family: 'Vazirmatn'; src: url('{VAZIRMATN}') format('woff2'); font-style: normal; font-weight: 100 900; font-display: swap; }}"
+    );
     rsx! {
+        document::Style { {font_faces} }
         document::Style { {include_str!("../../assets/style.css")} }
         if let Some(user_id) = ready_user {
             if show_music_shell(user_id, &source_state, *temporary_sources.read()) {
@@ -272,6 +292,7 @@ pub fn App() -> Element {
                     search: search_snapshot.read().clone(),
                     playback: playback_snapshot.read().clone(),
                     storage: storage_snapshot.read().clone(),
+                    source: source_state.clone(),
                     initial_settings: *return_settings.read(),
                     on_open_sources: move |_| { return_settings.set(true); temporary_sources.set(Some(user_id)); },
                 }
@@ -290,7 +311,7 @@ pub fn App() -> Element {
         } else if !*started.read() {
             main { class: "welcome-screen",
                 div { class: "welcome-top",
-                    div { class: "brand-mark", img { src: NOTE, alt: "" } }
+                    div { class: "brand-mark", img { src: LOGO, alt: "" } }
                     h1 { class: "brand-wordmark", span { "Tune" } span { "Stash" } }
                     p { class: "brand-subtitle", "Your Telegram music" br {} "in one place" }
                 }
@@ -312,7 +333,7 @@ pub fn App() -> Element {
                     span { class: "auth-brand", "Tune" span { "Stash" } }
                 }
                 div { class: "auth-content",
-                    div { class: "auth-mark", img { src: NOTE, alt: "" } }
+                    div { class: "auth-mark", img { src: LOGO, alt: "" } }
                     h1 { "{title}" }
                     p { class: "auth-description", "{description}" }
                     if matches!(step, Step::Phone | Step::Code | Step::Email | Step::EmailCode | Step::Password) {
@@ -361,6 +382,7 @@ pub fn App() -> Element {
                         }
                     }
                     if step == Step::EmailCode { button { class: "text-button", r#type: "button", onclick: move |_| send(AuthCommand::ResendCode, local_error), "Resend email code" } }
+                    if step == Step::CleanupFailed { button { class: "primary-button", r#type: "button", onclick: move |_| send(AuthCommand::RetryCleanup, local_error), "Retry local cleanup" } }
                     if let Some(message) = message { p { class: "auth-error", role: "alert", "{message}" } }
                 }
                 p { class: "auth-footnote", "This is an independent Telegram session on your device." }

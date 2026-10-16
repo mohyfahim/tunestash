@@ -264,6 +264,42 @@ impl LibraryStore {
         self.query_page(account, limit, None, LibrarySort::Recent)
     }
 
+    pub fn recent_plays(&self, account: i64, limit: usize) -> Result<Vec<TrackSummary>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT tracks.chat_id, tracks.message_id, tracks.title, tracks.artist,
+                    tracks.filename, choices.display_name, tracks.message_date,
+                    tracks.duration_seconds, tracks.cover_data
+             FROM recent_plays AS plays
+             JOIN indexed_tracks AS tracks ON tracks.account_id=plays.account_id
+               AND tracks.chat_id=plays.chat_id AND tracks.message_id=plays.message_id
+             JOIN source_choices AS choices ON choices.account_id=tracks.account_id
+               AND choices.chat_id=tracks.chat_id AND choices.enabled=1
+             WHERE plays.account_id=?1
+             ORDER BY plays.played_order DESC, tracks.chat_id DESC, tracks.message_id DESC
+             LIMIT ?2",
+            )
+            .map_err(|error| error.to_string())?;
+        statement
+            .query_map(params![account, limit as i64], |row| {
+                Ok(TrackSummary {
+                    chat_id: row.get(0)?,
+                    message_id: row.get(1)?,
+                    title: row.get(2)?,
+                    artist: row.get(3)?,
+                    filename: row.get(4)?,
+                    source_name: row.get(5)?,
+                    date: row.get(6)?,
+                    duration_seconds: row.get(7)?,
+                    cover_data: row.get(8)?,
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
     /// Queue creation must include rows beyond the UI's loaded page.
     pub fn all_tracks(&self, account: i64, sort: LibrarySort) -> Result<Vec<TrackSummary>, String> {
         let (_, total) = self.query_page(account, 0, None, sort)?;
@@ -464,7 +500,8 @@ impl LibraryStore {
 mod tests {
     use super::*;
     use crate::adapters::sqlite::SourceStore;
-    use music_core::domain::{MusicCheck, SourceChat, SourceKind};
+    use crate::adapters::sqlite::playback::PlaybackStore;
+    use music_core::domain::{MusicCheck, SourceChat, SourceKind, TrackKey};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn fixture() -> (std::path::PathBuf, LibraryStore) {
@@ -503,6 +540,63 @@ mod tests {
             duration_seconds: Some(60),
             cover_data: None,
         }
+    }
+
+    #[test]
+    fn listening_history_reorders_replays_and_respects_sources_accounts_and_logout() {
+        let (path, mut library) = fixture();
+        library.start_source(1, 10, false).unwrap();
+        library
+            .save_page(1, 10, MediaFilter::Audio, 0, &[track(1), track(2)])
+            .unwrap();
+        let source = SourceStore::open(&path).unwrap();
+        let chat = SourceChat {
+            chat_id: 10,
+            title: "Other account".into(),
+            subtitle: String::new(),
+            kind: SourceKind::SavedMessages,
+            selected: true,
+            music: MusicCheck::Found,
+        };
+        source.set_selected(2, &chat, true).unwrap();
+        library.start_source(2, 10, false).unwrap();
+        library
+            .save_page(2, 10, MediaFilter::Audio, 0, &[track(3)])
+            .unwrap();
+        let playback = PlaybackStore::open(&path).unwrap();
+        let key = |account_id, message_id| TrackKey {
+            account_id,
+            chat_id: 10,
+            message_id,
+        };
+        playback.record_play(key(1, 1)).unwrap();
+        playback.record_play(key(1, 2)).unwrap();
+        playback.record_play(key(1, 1)).unwrap();
+        playback.record_play(key(2, 3)).unwrap();
+        drop(playback);
+        drop(library);
+        let library = LibraryStore::open(&path).unwrap();
+        assert_eq!(
+            library
+                .recent_plays(1, 12)
+                .unwrap()
+                .iter()
+                .map(|t| t.message_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(library.recent_plays(2, 12).unwrap()[0].message_id, 3);
+        let mut source = SourceStore::open(&path).unwrap();
+        source.set_selected(1, &chat, false).unwrap();
+        assert!(library.recent_plays(1, 12).unwrap().is_empty());
+        source.set_selected(1, &chat, true).unwrap();
+        assert_eq!(library.recent_plays(1, 1).unwrap().len(), 1);
+        source.clear_account(1).unwrap();
+        assert!(library.recent_plays(1, 12).unwrap().is_empty());
+        assert_eq!(library.recent_plays(2, 12).unwrap().len(), 1);
+        drop(library);
+        drop(source);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

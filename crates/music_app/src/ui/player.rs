@@ -92,39 +92,6 @@ pub fn PlayerView(
                             svg { view_box: "0 0 24 24", fill: "currentColor", path { d: "M12 21s-8.5-5.4-9.7-10.7C1.4 6.3 3.7 3 7.4 3c2 0 3.5 1 4.6 2.3C13.1 4 14.6 3 16.6 3c3.7 0 6 3.3 5.1 7.3C20.5 15.6 12 21 12 21Z" } }
                         }
                     }
-                    div { class: "player-progress",
-                        input { r#type: "range", min: "0", max: "{duration.max(1)}", value: "{snapshot.position_ms.min(duration).max(0)}",
-                            style: "--seek-pct: {seek_percent}%",
-                            disabled: duration == 0, aria_label: "Seek position",
-                            oninput: move |event| if let Ok(ms) = event.value().parse::<i64>() { send(PlaybackCommand::Seek(ms)); }
-                        }
-                        div { span { "{clock(snapshot.position_ms)}" } span { "-{clock(remaining)}" } }
-                    }
-                    div { class: "player-transport",
-                        button { class: if snapshot.shuffle { "active" } else { "" }, r#type: "button", aria_label: "Shuffle", aria_pressed: snapshot.shuffle, onclick: move |_| send(PlaybackCommand::ToggleShuffle),
-                            svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round", path { d: "M4 6h2c4 0 7 12 11 12h3m-3-3 3 3-3 3M4 18h2c1.5 0 2.6-1.6 3.7-3.6M14.3 9.6C15.4 7.6 16.5 6 18 6h2m-3-3 3 3-3 3" } }
-                        }
-                        button { r#type: "button", aria_label: "Previous track", onclick: move |_| send(PlaybackCommand::Previous),
-                            svg { view_box: "0 0 24 24", fill: "currentColor", path { d: "M4 4h3v16H4zM20 4v16L8 12z" } }
-                        }
-                        button { class: "player-play", r#type: "button", aria_label: if is_playing { "Pause" } else { "Play" },
-                            onclick: move |_| send(if is_playing { PlaybackCommand::Pause } else { PlaybackCommand::Play }),
-                            if is_playing { svg { view_box: "0 0 24 24", fill: "currentColor", rect { x: "6", y: "4", width: "4", height: "16", rx: "1" } rect { x: "14", y: "4", width: "4", height: "16", rx: "1" } } }
-                            else { svg { view_box: "0 0 24 24", fill: "currentColor", path { d: "M7 4.5v15l12-7.5z" } } }
-                        }
-                        button { r#type: "button", aria_label: "Next track", onclick: move |_| send(PlaybackCommand::Next),
-                            svg { view_box: "0 0 24 24", fill: "currentColor", path { d: "M17 4h3v16h-3zM4 4v16l12-8z" } }
-                        }
-                        button { class: if snapshot.repeat != RepeatMode::Off { "active" } else { "" }, r#type: "button",
-                            aria_label: match snapshot.repeat { RepeatMode::Off => "Repeat off", RepeatMode::Queue => "Repeat queue", RepeatMode::Single => "Single play" },
-                            title: match snapshot.repeat { RepeatMode::Off => "Repeat off", RepeatMode::Queue => "Repeat queue", RepeatMode::Single => "Single play" },
-                            onclick: move |_| send(PlaybackCommand::CycleRepeat),
-                            svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round", path { d: "m17 2 3 3-3 3M20 5H7a4 4 0 0 0-4 4v2m4 11-3-3 3-3m-3 3h13a4 4 0 0 0 4-4v-2" } }
-                            if snapshot.repeat == RepeatMode::Single { span { class: "player-single-mark", "1" } }
-                        }
-                    }
-                    if !status.is_empty() { p { class: "player-status", role: "status", "{status}" } }
-                    if let Some(error) = &snapshot.error { p { class: "player-error", role: "alert", "{error}" } }
                     div { class: "player-actions",
                         button { r#type: "button", disabled: stream_only && snapshot.download != DownloadStatus::Saved,
                             aria_label: if snapshot.download == DownloadStatus::Saved { "Saved song actions" } else if stream_only { "Download unavailable while Stream only is on" } else { "Download song" },
@@ -159,6 +126,41 @@ pub fn PlayerView(
                         }
                     }
                 }
+            }
+            div { class: "player-footer",
+                    div { class: "player-progress",
+                        input { r#type: "range", min: "0", max: "{duration.max(1)}", value: "{snapshot.position_ms.min(duration).max(0)}",
+                            style: "--seek-pct: {seek_percent}%",
+                            disabled: duration == 0, aria_label: "Seek position",
+                            oninput: move |event| if let Ok(ms) = event.value().parse::<i64>() { send(PlaybackCommand::Seek(ms)); }
+                        }
+                        div { span { "{clock(snapshot.position_ms)}" } span { "-{clock(remaining)}" } }
+                    }
+                    div { class: "player-transport",
+                        button { class: if snapshot.shuffle { "active" } else { "" }, r#type: "button", aria_label: "Shuffle", aria_pressed: snapshot.shuffle, onclick: move |_| send(PlaybackCommand::ToggleShuffle),
+                            svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round", path { d: "M4 6h2c4 0 7 12 11 12h3m-3-3 3 3-3 3M4 18h2c1.5 0 2.6-1.6 3.7-3.6M14.3 9.6C15.4 7.6 16.5 6 18 6h2m-3-3 3 3-3 3" } }
+                        }
+                        button { r#type: "button", aria_label: "Previous track", onclick: move |_| send(PlaybackCommand::Previous),
+                            svg { view_box: "0 0 24 24", fill: "currentColor", path { d: "M4 4h3v16H4zM20 4v16L8 12z" } }
+                        }
+                        button { class: "player-play", r#type: "button", aria_label: if is_playing { "Pause" } else { "Play" },
+                            onclick: move |_| send(if is_playing { PlaybackCommand::Pause } else { PlaybackCommand::Play }),
+                            if is_playing { svg { view_box: "0 0 24 24", fill: "currentColor", rect { x: "6", y: "4", width: "4", height: "16", rx: "1" } rect { x: "14", y: "4", width: "4", height: "16", rx: "1" } } }
+                            else { svg { view_box: "0 0 24 24", fill: "currentColor", path { d: "M7 4.5v15l12-7.5z" } } }
+                        }
+                        button { r#type: "button", aria_label: "Next track", onclick: move |_| send(PlaybackCommand::Next),
+                            svg { view_box: "0 0 24 24", fill: "currentColor", path { d: "M17 4h3v16h-3zM4 4v16l12-8z" } }
+                        }
+                        button { class: if snapshot.repeat != RepeatMode::Off { "active" } else { "" }, r#type: "button",
+                            aria_label: match snapshot.repeat { RepeatMode::Off => "Repeat off", RepeatMode::Queue => "Repeat queue", RepeatMode::Single => "Single play" },
+                            title: match snapshot.repeat { RepeatMode::Off => "Repeat off", RepeatMode::Queue => "Repeat queue", RepeatMode::Single => "Single play" },
+                            onclick: move |_| send(PlaybackCommand::CycleRepeat),
+                            svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", stroke_linecap: "round", stroke_linejoin: "round", path { d: "m17 2 3 3-3 3M20 5H7a4 4 0 0 0-4 4v2m4 11-3-3 3-3m-3 3h13a4 4 0 0 0 4-4v-2" } }
+                            if snapshot.repeat == RepeatMode::Single { span { class: "player-single-mark", "1" } }
+                        }
+                    }
+                    if !status.is_empty() { p { class: "player-status", role: "status", "{status}" } }
+                    if let Some(error) = &snapshot.error { p { class: "player-error", role: "alert", "{error}" } }
             }
         }
         if let Some((key, title)) = saved_actions.read().clone() {

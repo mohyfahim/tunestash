@@ -55,3 +55,21 @@ pub fn android_storage() -> Result<AndroidStorage, String> {
         })
     })
 }
+
+#[cfg(target_os = "android")]
+pub fn clear_tdlib_key() -> Result<(), String> {
+    use jni::objects::JValue;
+    crate::adapters::media::with_context(|env, context| {
+        let class = env
+            .get_object_class(context)
+            .map_err(|_| "Cannot access Android secure storage".to_string())?;
+        env.call_static_method(
+            class,
+            "clearTdlibKey",
+            "(Landroid/content/Context;)V",
+            &[JValue::Object(context)],
+        )
+        .map_err(|_| "Could not clear the local Telegram database key".to_string())?;
+        Ok(())
+    })
+}

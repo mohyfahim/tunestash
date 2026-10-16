@@ -1,8 +1,10 @@
 use crate::runtime::AuthService;
 use dioxus::prelude::*;
-use music_core::domain::{DiscoveryStage, SourceChat, SourceCommand, SourceKind, SourceSnapshot};
+use music_core::domain::{
+    DiscoveryStage, MusicCheck, SourceChat, SourceCommand, SourceKind, SourceSnapshot,
+};
 
-const NOTE: Asset = asset!("/assets/music-note.svg");
+const LOGO: Asset = asset!("/assets/tunestash-logo-v2.png");
 
 fn dispatch(command: SourceCommand, mut error: Signal<Option<String>>) -> bool {
     error.set(None);
@@ -31,7 +33,6 @@ pub fn SourceView(
     on_next: EventHandler<()>,
 ) -> Element {
     let mut query = use_signal(String::new);
-    let mut expanded_defaults = use_signal(|| false);
     let mut visible_chat_count = use_signal(|| 40usize);
     let mut confirm_change = use_signal(|| false);
     let error = use_signal(|| None::<String>);
@@ -43,14 +44,13 @@ pub fn SourceView(
     let setup_complete = snapshot.setup_complete;
     let all_defaults: Vec<_> = snapshot.default_chats().cloned().collect();
     let default_count = all_defaults.len();
-    let defaults: Vec<_> = all_defaults
-        .into_iter()
-        .take(if *expanded_defaults.read() {
-            usize::MAX
-        } else {
-            5
-        })
-        .collect();
+    let defaults = all_defaults;
+    let can_finish = snapshot.stage == DiscoveryStage::Complete
+        || (snapshot.stage == DiscoveryStage::CheckingMusic
+            && snapshot
+                .chats
+                .iter()
+                .any(|chat| chat.music == MusicCheck::Found));
     let selected: Vec<_> = snapshot.selected_chats().cloned().collect();
     let term = query.read().trim().to_lowercase();
     let all_available: Vec<_> = snapshot
@@ -92,7 +92,11 @@ pub fn SourceView(
                     h1 { if snapshot.signing_out { "Changing account" } else { "Finding your music sources" } }
                     p { class: "source-loading-description", if snapshot.signing_out { "Ending this Telegram session…" } else { "Looking through your chats for playable music files." } }
                     if !snapshot.signing_out {
-                        div { class: "source-loading-line", role: "progressbar", aria_label: "Finding Telegram chats" }
+                        if snapshot.stage == DiscoveryStage::CheckingMusic {
+                            progress { class: "source-meter", value: "{snapshot.checked_chats}", max: "{snapshot.total_chats.max(1)}", aria_label: "Music source checks completed" }
+                        } else {
+                            progress { class: "source-meter", max: "1", aria_label: "Loading Telegram chats" }
+                        }
                         p { class: "source-progress", role: "status", "{progress}" }
                     }
                     if let Some(message) = snapshot.error.as_ref() {
@@ -132,7 +136,7 @@ pub fn SourceView(
             main { class: "sources-screen", id: "music-sources",
                 div { class: "sources-layout",
                     header { class: "sources-header",
-                        div { class: "sources-brand", img { class: "sources-brand-mark", src: NOTE, alt: "" } span { "Tune" span { "Stash" } } }
+                        div { class: "sources-brand", img { class: "sources-brand-mark", src: LOGO, alt: "" } span { "Tune" span { "Stash" } } }
                         div { class: "sources-title-row",
                             h1 { "Music Sources" }
                             div { class: "sources-title-actions",
@@ -142,7 +146,7 @@ pub fn SourceView(
                                     "Resync"
                                 }
                                 button { class: "source-header-action source-next", r#type: "button",
-                                    disabled: onboarding && (snapshot.stage != DiscoveryStage::Complete || snapshot.signing_out),
+                                    disabled: onboarding && (!can_finish || snapshot.signing_out),
                                     onclick: move |_| {
                                         if !onboarding || setup_complete || dispatch(SourceCommand::FinishSetup, error) {
                                             on_next.call(());
@@ -163,7 +167,11 @@ pub fn SourceView(
                     }
                     if snapshot.stage == DiscoveryStage::Failed || snapshot.stage == DiscoveryStage::CheckingMusic || snapshot.failed_checks > 0 {
                         div { class: "discovery-banner", role: "status",
-                            span { "{progress}" }
+                            div { class: "discovery-banner-copy", span { "{progress}" }
+                                if snapshot.stage == DiscoveryStage::CheckingMusic {
+                                    progress { class: "source-meter", value: "{snapshot.checked_chats}", max: "{snapshot.total_chats.max(1)}", aria_label: "Music source checks completed" }
+                                }
+                            }
                             if snapshot.stage == DiscoveryStage::Failed || (snapshot.stage == DiscoveryStage::Complete && snapshot.failed_checks > 0) {
                                 button { r#type: "button", onclick: move |_| { dispatch(SourceCommand::RetryDiscovery, error); }, "Retry" }
                             }
@@ -189,16 +197,11 @@ pub fn SourceView(
                         p { class: "source-message", role: "alert", "{message}" }
                     }
                     section { class: "sources-section", aria_label: "Default sources",
-                        div { class: "section-heading", h2 { "Default Sources" } p { "Your personal archive, channels, and music bots." } }
+                        div { class: "section-heading", h2 { "Default Sources ({default_count})" } p { "Your personal archive, channels, and music bots." } }
                         div { class: "default-list",
                             for chat in defaults { SourceRow { key: "default-{chat.chat_id}", chat, compact: false } }
                         }
                         if default_count == 0 { p { class: "source-empty", "No default sources with music found yet." } }
-                        if default_count > 5 {
-                            button { class: "source-expand", r#type: "button", onclick: move |_| expanded_defaults.toggle(),
-                                if *expanded_defaults.read() { "Show fewer default sources" } else { "Show all {default_count} default sources" }
-                            }
-                        }
                     }
                     section { class: "sources-section", aria_label: "Selected chats",
                         div { class: "section-heading heading-with-action",

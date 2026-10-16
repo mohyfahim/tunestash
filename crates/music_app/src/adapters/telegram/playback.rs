@@ -68,6 +68,8 @@ pub struct PlaybackEngine {
     fallback_key: Option<TrackKey>,
     fallback_attempted: HashSet<TrackKey>,
     recover_downloads: Vec<TrackKey>,
+    last_recorded_key: Option<TrackKey>,
+    copy_workers: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl PlaybackEngine {
@@ -119,6 +121,8 @@ impl PlaybackEngine {
             fallback_key: None,
             fallback_attempted: HashSet::new(),
             recover_downloads: Vec::new(),
+            last_recorded_key: None,
+            copy_workers: Vec::new(),
         }
     }
 
@@ -138,6 +142,7 @@ impl PlaybackEngine {
             return;
         }
         self.account = account;
+        self.last_recorded_key = None;
         self.recover_downloads = account
             .and_then(|id| self.store.as_ref()?.pending_downloads(id).ok())
             .unwrap_or_default();
@@ -176,10 +181,24 @@ impl PlaybackEngine {
         self.refresh_storage();
     }
 
-    pub fn logout(&mut self, account: i64) {
+    pub fn begin_logout(&mut self, td: &TdJson) {
+        for file in self.files.values() {
+            let _ = td.send(&json!({"@type":"cancelDownloadFile","file_id":file.file_id,
+                "only_if_pending":false}));
+        }
         let _ = media::dispatch("stop", "{}");
         self.set_account(None);
-        let _ = std::fs::remove_dir_all(self.media_root.join(account.to_string()));
+        for worker in self.copy_workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+
+    pub fn finish_logout(&mut self, account: i64) -> Result<(), String> {
+        match std::fs::remove_dir_all(self.media_root.join(account.to_string())) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("Could not remove offline songs: {error}")),
+        }
     }
 
     fn publish_storage(&mut self) {
@@ -461,6 +480,7 @@ impl PlaybackEngine {
         let Some(track) = self.state.current().cloned() else {
             return;
         };
+        self.last_recorded_key = None;
         self.state.status = PlaybackStatus::Loading;
         self.state.position_ms = position_ms.max(0);
         self.state.artwork_data = None;
@@ -843,9 +863,9 @@ impl PlaybackEngine {
                 .join(key.account_id.to_string())
                 .join(format!("{}-{}-{epoch}.audio", key.chat_id, key.message_id));
             let tx = self.copy_tx.clone();
-            std::thread::spawn(move || {
+            self.copy_workers.push(std::thread::spawn(move || {
                 let _ = tx.send((key, epoch, copy_complete(&source, &dest, expected)));
-            });
+            }));
         }
     }
 
@@ -893,10 +913,29 @@ impl PlaybackEngine {
         self.reads = pending;
     }
 
-    pub fn media_event(&mut self, td: &TdJson, value: &Value) {
+    pub fn media_event(&mut self, td: &TdJson, value: &Value) -> bool {
         let mut persist = true;
+        let mut history_changed = false;
         match value["type"].as_str().unwrap_or("") {
-            "playing" => self.state.status = PlaybackStatus::Playing,
+            "playing" => {
+                self.state.status = PlaybackStatus::Playing;
+                if let Some(key) = self.state.current_key()
+                    && self.account == Some(key.account_id)
+                    && value["media_id"].as_str()
+                        == Some(
+                            format!("{}:{}:{}", key.account_id, key.chat_id, key.message_id)
+                                .as_str(),
+                        )
+                    && self.last_recorded_key != Some(key)
+                    && self
+                        .store
+                        .as_ref()
+                        .is_some_and(|store| store.record_play(key).is_ok())
+                {
+                    self.last_recorded_key = Some(key);
+                    history_changed = true;
+                }
+            }
             "paused" => self.state.status = PlaybackStatus::Paused,
             "buffering" => self.state.status = PlaybackStatus::Buffering,
             "ready" => {
@@ -918,10 +957,10 @@ impl PlaybackEngine {
                     .current_key()
                     .map(|key| format!("{}:{}:{}", key.account_id, key.chat_id, key.message_id));
                 if expected.as_deref() != value["media_id"].as_str() {
-                    return;
+                    return false;
                 }
                 let Some(data) = value["data"].as_str().filter(|data| data.len() < 700_000) else {
-                    return;
+                    return false;
                 };
                 self.state.artwork_data = Some(data.to_string());
                 persist = false;
@@ -951,12 +990,13 @@ impl PlaybackEngine {
                         .filter(|key| !self.fallback_attempted.contains(key));
                 }
             }
-            _ => return,
+            _ => return false,
         }
         if persist {
             self.persist();
         }
         self.publish();
+        history_changed
     }
 
     fn command_without_library(&mut self, td: &TdJson, next: bool) {
@@ -972,6 +1012,15 @@ impl PlaybackEngine {
     }
 
     pub fn tick(&mut self, td: &TdJson) {
+        let mut active_workers = Vec::new();
+        for worker in self.copy_workers.drain(..) {
+            if worker.is_finished() {
+                let _ = worker.join();
+            } else {
+                active_workers.push(worker);
+            }
+        }
+        self.copy_workers = active_workers;
         if self.startup_cleanup_pending {
             self.startup_cleanup_pending = false;
             self.request_cache_cleanup(td);
@@ -1250,6 +1299,29 @@ mod tests {
     use super::*;
     use crate::adapters::sqlite::SourceStore;
     use music_core::domain::LibrarySnapshot;
+
+    #[test]
+    fn logout_reports_file_cleanup_failure_and_can_retry() {
+        let root = std::env::temp_dir().join(format!("tunestash-logout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let files = root.join("tdlib/files");
+        std::fs::create_dir_all(&files).unwrap();
+        let blocked = root.join("tdlib/offline/7");
+        std::fs::create_dir_all(blocked.parent().unwrap()).unwrap();
+        std::fs::write(&blocked, b"blocked").unwrap();
+        let (playback_tx, _) = watch::channel(PlaybackSnapshot::default());
+        let (storage_tx, _) = watch::channel(StorageSnapshot::default());
+        let mut engine = PlaybackEngine::new(
+            root.join("sources.sqlite").to_str().unwrap(),
+            files.to_str().unwrap(),
+            playback_tx,
+            storage_tx,
+        );
+        assert!(engine.finish_logout(7).is_err());
+        std::fs::remove_file(&blocked).unwrap();
+        assert!(engine.finish_logout(7).is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn partial_copy_never_becomes_a_saved_file() {

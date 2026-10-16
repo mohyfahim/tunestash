@@ -1,5 +1,6 @@
 use super::TdJson;
 use crate::adapters::sqlite::SourceStore;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use music_core::domain::{
     DiscoveryStage, FailedChatCheck, MusicCheck, SourceChat, SourceCommand, SourceKind,
     SourceSnapshot,
@@ -149,6 +150,8 @@ pub struct SourceEngine {
     jobs: VecDeque<Job>,
     active: BTreeMap<i64, (Job, Instant)>,
     logout_account: Option<i64>,
+    profile_photo_id: Option<i64>,
+    profile_photo_request: Option<i64>,
     scan_epochs: BTreeMap<i64, u64>,
     proof_messages: BTreeMap<i64, i64>,
     // Chats that already reached a finished music check in this scan. Rechecks
@@ -159,6 +162,7 @@ pub struct SourceEngine {
     last_report: Option<Instant>,
     stats: ScanStats,
     audio_pages_per_chat: BTreeMap<i64, u64>,
+    classification_attempts: BTreeMap<i64, u8>,
 }
 
 impl SourceEngine {
@@ -186,6 +190,8 @@ impl SourceEngine {
             jobs: VecDeque::new(),
             active: BTreeMap::new(),
             logout_account: None,
+            profile_photo_id: None,
+            profile_photo_request: None,
             scan_epochs: BTreeMap::new(),
             proof_messages: BTreeMap::new(),
             finished_checks: BTreeSet::new(),
@@ -194,6 +200,7 @@ impl SourceEngine {
             last_report: None,
             stats: ScanStats::default(),
             audio_pages_per_chat: BTreeMap::new(),
+            classification_attempts: BTreeMap::new(),
         }
     }
 
@@ -237,6 +244,29 @@ impl SourceEngine {
         } else {
             display
         };
+        self.snapshot.username = user["usernames"]["active_usernames"]
+            .as_array()
+            .and_then(|names| names.first())
+            .and_then(Value::as_str)
+            .or_else(|| user["username"].as_str())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
+        self.profile_photo_id = user["profile_photo"]["small"]["id"].as_i64();
+        self.profile_photo_request = None;
+        if let Some(file_id) = self.profile_photo_id {
+            let file = &user["profile_photo"]["small"];
+            self.accept_profile_photo(file);
+            if self.snapshot.profile_photo_data.is_none() {
+                let request = td.next_request_id();
+                if td
+                    .send(&json!({"@type":"downloadFile","file_id":file_id,
+                    "priority":8,"offset":0,"limit":0,"synchronous":false,"@extra":request}))
+                    .is_ok()
+                {
+                    self.profile_photo_request = Some(request);
+                }
+            }
+        }
         self.jobs.clear();
         self.active.clear();
         self.probe_pause_until = None;
@@ -325,6 +355,7 @@ impl SourceEngine {
         self.last_report = self.scan_started;
         self.stats = ScanStats::default();
         self.audio_pages_per_chat.clear();
+        self.classification_attempts.clear();
         scan_log("event=start");
         self.jobs.clear();
         self.active.clear();
@@ -416,7 +447,15 @@ impl SourceEngine {
                 let Some(account) = self.snapshot.account_id else {
                     return;
                 };
-                if self.snapshot.stage != DiscoveryStage::Complete
+                if !matches!(
+                    self.snapshot.stage,
+                    DiscoveryStage::Complete | DiscoveryStage::CheckingMusic
+                ) || (self.snapshot.stage == DiscoveryStage::CheckingMusic
+                    && !self
+                        .snapshot
+                        .chats
+                        .iter()
+                        .any(|chat| chat.music == MusicCheck::Found))
                     || self.snapshot.signing_out
                     || self.snapshot.setup_complete
                 {
@@ -467,11 +506,9 @@ impl SourceEngine {
     }
 
     pub fn signed_out(&mut self) {
-        if let Some(account) = self.logout_account.take()
-            && let Some(store) = &mut self.store
-        {
-            let _ = store.clear_account(account);
-        }
+        self.logout_account = None;
+        self.profile_photo_id = None;
+        self.profile_photo_request = None;
         self.jobs.clear();
         self.active.clear();
         self.probe_pause_until = None;
@@ -483,6 +520,19 @@ impl SourceEngine {
         self.proof_messages.clear();
         self.finished_checks.clear();
         self.snapshot = SourceSnapshot::default();
+        self.publish();
+    }
+
+    pub fn clear_account_data(&mut self, account: i64) -> Result<(), String> {
+        self.store
+            .as_mut()
+            .ok_or("Source storage is unavailable".to_string())?
+            .clear_account(account)
+    }
+
+    pub fn logout_error(&mut self, message: &str) {
+        self.snapshot.signing_out = false;
+        self.snapshot.error = Some(message.into());
         self.publish();
     }
 
@@ -567,13 +617,9 @@ impl SourceEngine {
             music: MusicCheck::Unchecked,
         });
         if is_new && self.snapshot.stage == DiscoveryStage::CheckingMusic {
-            if let Some(user_id) = meta.private_user {
-                // Bots and people share chatTypePrivate. Classify first so bots
-                // can be checked with channels, and regular DMs wait behind them.
-                self.enqueue_job(Job::User { chat_id, user_id });
-            } else {
-                self.queue_probe(chat_id);
-            }
+            // A private chat only needs a user lookup if it actually contains
+            // music. Most chats can finish with just the media probes.
+            self.queue_probe(chat_id);
             self.refresh_progress();
             self.publish();
         }
@@ -613,17 +659,10 @@ impl SourceEngine {
     fn job_priority(&self, job: &Job) -> u8 {
         match job {
             Job::Audio { chat_id, .. } => self.probe_priority(*chat_id),
-            Job::User { chat_id, .. } => {
-                let awaiting_probe =
-                    self.snapshot.chats.iter().any(|chat| {
-                        chat.chat_id == *chat_id && chat.music == MusicCheck::Unchecked
-                    });
-                // Classify unchecked private chats before ordinary DM/group probes.
-                // Labeling after music is found can wait.
-                if awaiting_probe { 2 } else { 6 }
-            }
+            // Label proven music chats before the remaining history probes so
+            // default sources appear as soon as their type is known.
+            Job::User { .. } | Job::Channel { .. } => 0,
             Job::GetChat { .. } => 1,
-            Job::Channel { .. } => 6,
             _ => 0,
         }
     }
@@ -645,8 +684,8 @@ impl SourceEngine {
         let Some(meta) = self.chats.get(&chat_id).cloned() else {
             return;
         };
-        // Private chats are classified before their music probe.
-        if meta.private_user.is_some() {
+        if let Some(user_id) = meta.private_user {
+            self.enqueue_job(Job::User { chat_id, user_id });
             return;
         }
         if let Some(supergroup_id) = meta.supergroup {
@@ -658,6 +697,22 @@ impl SourceEngine {
     }
 
     pub fn handle_value(&mut self, _td: &TdJson, value: &Value) -> bool {
+        if value["@extra"].as_i64() == self.profile_photo_request
+            && self.profile_photo_request.is_some()
+        {
+            self.profile_photo_request = None;
+            if value["@type"] == "file" {
+                self.accept_profile_photo(value);
+            }
+            return true;
+        }
+        if value["@type"] == "updateFile"
+            && value["file"]["id"].as_i64() == self.profile_photo_id
+            && self.profile_photo_id.is_some()
+        {
+            self.accept_profile_photo(&value["file"]);
+            return true;
+        }
         // Source discovery runs only for the first scan or an explicit resync.
         // TDLib keeps sending live chat/message updates after that; consuming
         // them here must not start another source check.
@@ -846,7 +901,7 @@ impl SourceEngine {
                         return true;
                     }
                     if matches!(job, Job::User { .. } | Job::Channel { .. }) {
-                        // Classification may be incomplete, but the media check can still succeed.
+                        self.retry_classification(job, code, reason);
                     } else if code == 400
                         && reason == "Can't access the chat"
                         && self
@@ -917,7 +972,17 @@ impl SourceEngine {
                     self.ingest_chat(value);
                 }
             }
-            Job::User { chat_id, .. } => {
+            Job::User { chat_id, user_id } => {
+                if value["@type"] != "user" || value["id"].as_i64() != Some(user_id) {
+                    self.retry_classification(
+                        Job::User { chat_id, user_id },
+                        0,
+                        "Invalid user details",
+                    );
+                    return true;
+                }
+                self.classification_attempts.remove(&chat_id);
+                self.clear_classification_failure(chat_id);
                 let first = value["first_name"].as_str().unwrap_or("");
                 let last = value["last_name"].as_str().unwrap_or("");
                 let display = format!("{first} {last}").trim().to_string();
@@ -947,7 +1012,27 @@ impl SourceEngine {
                     self.queue_probe(chat_id);
                 }
             }
-            Job::Channel { chat_id, .. } => {
+            Job::Channel {
+                chat_id,
+                supergroup_id,
+            } => {
+                if value["@type"] != "supergroup"
+                    || value["id"].as_i64() != Some(supergroup_id)
+                    || !value["is_channel"].is_boolean()
+                    || !value["status"]["@type"].is_string()
+                {
+                    self.retry_classification(
+                        Job::Channel {
+                            chat_id,
+                            supergroup_id,
+                        },
+                        0,
+                        "Invalid channel details",
+                    );
+                    return true;
+                }
+                self.classification_attempts.remove(&chat_id);
+                self.clear_classification_failure(chat_id);
                 if value["is_channel"] == true
                     && value["status"]["@type"] == "chatMemberStatusCreator"
                 {
@@ -964,6 +1049,27 @@ impl SourceEngine {
             } => self.process_probe(value, chat_id, before, epoch, documents),
         }
         true
+    }
+
+    fn accept_profile_photo(&mut self, file: &Value) {
+        if file["local"]["is_downloading_completed"] != true {
+            return;
+        }
+        let Some(path) = file["local"]["path"]
+            .as_str()
+            .filter(|path| !path.is_empty())
+        else {
+            return;
+        };
+        if let Ok(metadata) = std::fs::metadata(path)
+            && metadata.is_file()
+            && metadata.len() <= 512_000
+            && let Ok(bytes) = std::fs::read(path)
+        {
+            self.snapshot.profile_photo_data =
+                Some(format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes)));
+            self.publish();
+        }
     }
 
     fn update_list_membership(&mut self, chat_id: i64, list: &Value, present: bool) {
@@ -1109,14 +1215,15 @@ impl SourceEngine {
     }
 
     fn retry_failed(&mut self) {
-        let failed: Vec<_> = self
-            .snapshot
-            .failed_chats
-            .iter()
-            .map(|item| item.chat_id)
-            .collect();
+        let failed = self.snapshot.failed_chats.clone();
         self.snapshot.failed_chats.clear();
-        for chat_id in failed {
+        for failure in failed {
+            let chat_id = failure.chat_id;
+            if failure.operation == "source type" {
+                self.classification_attempts.remove(&chat_id);
+                self.queue_classification(chat_id);
+                continue;
+            }
             self.invalidate_probe(chat_id);
             if let Some(chat) = self
                 .snapshot
@@ -1255,6 +1362,34 @@ impl SourceEngine {
         self.publish();
     }
 
+    fn retry_classification(&mut self, job: Job, code: i64, reason: &str) {
+        let Some(chat_id) = job.chat_id() else { return };
+        let attempts = self.classification_attempts.entry(chat_id).or_default();
+        if *attempts < 2 {
+            *attempts += 1;
+            self.enqueue_job(job);
+            return;
+        }
+        self.snapshot
+            .failed_chats
+            .retain(|failure| failure.chat_id != chat_id);
+        self.snapshot.failed_chats.push(FailedChatCheck {
+            chat_id,
+            operation: "source type".into(),
+            code,
+            reason: reason.into(),
+        });
+        self.refresh_progress();
+        self.publish();
+    }
+
+    fn clear_classification_failure(&mut self, chat_id: i64) {
+        self.snapshot
+            .failed_chats
+            .retain(|failure| failure.chat_id != chat_id || failure.operation != "source type");
+        self.refresh_progress();
+    }
+
     fn mark_inaccessible(&mut self, chat_id: i64) {
         self.proof_messages.remove(&chat_id);
         if let Some(chat) = self
@@ -1372,6 +1507,10 @@ impl SourceEngine {
     fn fail_timeout(&mut self, job: Job) {
         self.stats.timeouts += 1;
         scan_log(&format!("event=timeout kind={}", job.log_kind()));
+        if matches!(job, Job::User { .. } | Job::Channel { .. }) {
+            self.retry_classification(job, 0, "Request timed out");
+            return;
+        }
         if let Some(chat_id) = job.chat_id() {
             if !matches!(job, Job::GetChat { .. })
                 || self
@@ -1564,6 +1703,43 @@ impl SourceEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_profile_uses_photo_when_available_and_keeps_username_optional() {
+        let path =
+            std::env::temp_dir().join(format!("tunestash-profile-{}.sqlite", std::process::id()));
+        let photo = path.with_extension("jpg");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&photo, b"jpeg-data").unwrap();
+        let (updates, _) = watch::channel(SourceSnapshot::default());
+        let mut engine = SourceEngine::new(path.to_str().unwrap(), updates);
+        engine.authorized(
+            &TdJson,
+            7,
+            &json!({
+                "first_name":"Ada", "last_name":"Lovelace",
+                "usernames":{"active_usernames":["ada"]},
+                "profile_photo":{"small":{"id":5,"local":{
+                    "is_downloading_completed":true,"path":photo.to_str().unwrap()
+                }}}
+            }),
+        );
+        assert_eq!(engine.snapshot.account_name, "Ada Lovelace");
+        assert_eq!(engine.snapshot.username.as_deref(), Some("ada"));
+        assert!(
+            engine
+                .snapshot
+                .profile_photo_data
+                .as_ref()
+                .unwrap()
+                .starts_with("data:image/jpeg;base64,")
+        );
+        engine.signed_out();
+        assert!(engine.snapshot.profile_photo_data.is_none());
+        assert!(engine.snapshot.username.is_none());
+        let _ = std::fs::remove_file(photo);
+        let _ = std::fs::remove_file(path);
+    }
 
     fn selected_engine(label: &str) -> (SourceEngine, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!(
@@ -1760,9 +1936,11 @@ mod tests {
         let (mut engine, path) = selected_engine("finish-setup");
         engine.snapshot.chats[0].selected = false;
         engine.snapshot.stage = DiscoveryStage::CheckingMusic;
+        engine.snapshot.chats[0].music = MusicCheck::Unchecked;
         engine.handle_command(&TdJson, SourceCommand::FinishSetup);
         assert!(!engine.snapshot.setup_complete);
 
+        engine.snapshot.chats[0].music = MusicCheck::Found;
         engine.snapshot.stage = DiscoveryStage::Complete;
         engine.snapshot.failed_chats.push(FailedChatCheck {
             chat_id: 99,
@@ -1783,6 +1961,27 @@ mod tests {
         restored.authorized(&TdJson, 7, &json!({"first_name":"Test"}));
         assert!(restored.snapshot.setup_complete);
         drop(restored);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn first_source_can_finish_setup_while_discovery_continues() {
+        let (mut engine, path) = selected_engine("early-setup");
+        engine.snapshot.stage = DiscoveryStage::CheckingMusic;
+        engine.snapshot.chats[0].selected = true;
+        engine.handle_command(&TdJson, SourceCommand::FinishSetup);
+        assert!(engine.snapshot.setup_complete);
+        assert_eq!(engine.snapshot.stage, DiscoveryStage::CheckingMusic);
+        assert!(
+            engine
+                .store
+                .as_ref()
+                .unwrap()
+                .load_discovery(7)
+                .unwrap()
+                .is_none()
+        );
+        drop(engine);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1963,7 +2162,7 @@ mod tests {
     }
 
     #[test]
-    fn private_chats_classify_before_music_probe() {
+    fn private_chats_classify_only_after_music_is_found() {
         let (mut engine, path) = selected_engine("classify-private");
         engine.lists_ready = true;
         engine.main_ids.insert(50);
@@ -1982,13 +2181,20 @@ mod tests {
             engine
                 .jobs
                 .iter()
-                .any(|job| matches!(job, Job::User { chat_id: 50, .. }))
+                .any(|job| matches!(job, Job::Audio { chat_id: 50, .. }))
         );
         assert!(
             engine
                 .jobs
                 .iter()
-                .all(|job| !matches!(job, Job::Audio { chat_id: 50, .. }))
+                .all(|job| !matches!(job, Job::User { .. }))
+        );
+        engine.mark_found(50, 9);
+        assert!(
+            engine
+                .jobs
+                .iter()
+                .any(|job| matches!(job, Job::User { chat_id: 50, .. }))
         );
         drop(engine);
         let _ = std::fs::remove_file(path);
@@ -2077,7 +2283,7 @@ mod tests {
     }
 
     #[test]
-    fn music_probes_start_before_channel_labeling() {
+    fn found_channels_are_classified_while_other_probes_continue() {
         let (mut engine, path) = selected_engine("probe-priority");
         engine.snapshot.stage = DiscoveryStage::CheckingMusic;
         engine.snapshot.chats[0].music = MusicCheck::Unchecked;
@@ -2090,10 +2296,7 @@ mod tests {
                 supergroup: Some(42),
             },
         );
-        engine.enqueue_job(Job::Channel {
-            chat_id: 42,
-            supergroup_id: 42,
-        });
+        engine.mark_found(42, 9);
         for chat_id in 43..(43 + MAX_INFLIGHT as i64) {
             engine.add_chat(SourceChat {
                 chat_id,
@@ -2111,8 +2314,54 @@ mod tests {
             engine
                 .active
                 .values()
-                .all(|(job, _)| matches!(job, Job::Audio { .. }))
+                .any(|(job, _)| matches!(job, Job::Channel { chat_id: 42, .. }))
         );
+        assert!(
+            engine
+                .active
+                .values()
+                .any(|(job, _)| matches!(job, Job::Audio { .. }))
+        );
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn failed_channel_classification_is_reported_and_retryable() {
+        let (mut engine, path) = selected_engine("classification-failure");
+        engine.snapshot.stage = DiscoveryStage::CheckingMusic;
+        engine.chats.insert(
+            42,
+            ChatMeta {
+                title: "Channel".into(),
+                subtitle: "Channel or group".into(),
+                private_user: None,
+                supergroup: Some(42),
+            },
+        );
+        for request in 1..=3 {
+            engine.jobs.clear();
+            engine.active.insert(
+                request,
+                (
+                    Job::Channel {
+                        chat_id: 42,
+                        supergroup_id: 42,
+                    },
+                    Instant::now(),
+                ),
+            );
+            engine.handle_value(
+                &TdJson,
+                &json!({"@extra":request,"@type":"error","code":500,"message":"Temporary failure"}),
+            );
+        }
+        assert_eq!(engine.snapshot.chats[0].music, MusicCheck::Found);
+        assert_eq!(engine.snapshot.failed_checks, 1);
+        engine.snapshot.stage = DiscoveryStage::Complete;
+        engine.handle_command(&TdJson, SourceCommand::RetryDiscovery);
+        assert_eq!(engine.snapshot.stage, DiscoveryStage::CheckingMusic);
+        assert_eq!(engine.snapshot.failed_checks, 0);
         assert!(
             engine
                 .jobs
@@ -2162,7 +2411,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_lists_orders_saved_channels_then_private_classification() {
+    fn finish_lists_probes_private_chats_without_classifying_empty_chats() {
         let path =
             std::env::temp_dir().join(format!("tunestash-priority-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
@@ -2212,11 +2461,18 @@ mod tests {
             vec![
                 "audio:7".to_string(),
                 "audio:40".to_string(),
-                "user:30".to_string(),
+                "audio:30".to_string(),
                 "audio:20".to_string(),
             ]
         );
 
+        engine.mark_found(30, 9);
+        assert!(
+            engine
+                .jobs
+                .iter()
+                .any(|job| matches!(job, Job::User { chat_id: 30, .. }))
+        );
         engine.active.insert(
             500,
             (
@@ -2246,7 +2502,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // Bot music checks join the channel tier, ahead of ordinary groups.
+        // Classification changes the source kind without repeating the probe.
         assert_eq!(probe_ids, vec![7, 40, 30, 20]);
         assert_eq!(
             engine
@@ -2262,7 +2518,7 @@ mod tests {
     }
 
     #[test]
-    fn regular_private_chats_wait_behind_channels_and_bots() {
+    fn regular_private_chats_keep_their_probe_after_classification() {
         let path = std::env::temp_dir().join(format!(
             "tunestash-private-priority-{}.sqlite",
             std::process::id()
@@ -2300,6 +2556,7 @@ mod tests {
         );
         engine.main_ids.extend([20, 30, 40]);
         engine.finish_lists();
+        engine.mark_found(30, 9);
         engine.active.insert(
             501,
             (

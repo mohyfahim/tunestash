@@ -79,5 +79,13 @@ class MainActivity : WryActivity() {
             require(raw.size == 32)
             return Base64.encodeToString(raw, Base64.NO_WRAP)
         }
+
+        @JvmStatic
+        fun clearTdlibKey(context: Context) {
+            check(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().remove(KEY).commit())
+            val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            if (store.containsAlias(ALIAS)) store.deleteEntry(ALIAS)
+        }
     }
 }

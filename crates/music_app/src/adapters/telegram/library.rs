@@ -178,6 +178,14 @@ impl LibraryEngine {
                         Some("Can't read recent tracks. Check device storage and restart.".into())
                 }
             }
+            match store.recent_plays(account, HOME_RECENT_LIMIT) {
+                Ok(tracks) => snapshot.recent_plays = tracks,
+                Err(_) => {
+                    snapshot.error = Some(
+                        "Can't read listening history. Check device storage and restart.".into(),
+                    )
+                }
+            }
         }
         snapshot.indexing_sources = self
             .queued
@@ -192,6 +200,10 @@ impl LibraryEngine {
         self.search_updates
             .send_replace(self.search_snapshot(&snapshot));
         self.updates.send_replace(snapshot);
+    }
+
+    pub fn refresh_recent_plays(&self) {
+        self.publish();
     }
 
     fn search_snapshot(&self, library: &LibrarySnapshot) -> SearchSnapshot {
@@ -416,11 +428,10 @@ impl LibraryEngine {
                     self.search_query = query.clone();
                     self.search_loaded = 50;
                 }
-                if let (Some(store), Some(account)) = (&self.store, self.account) {
-                    if store.save_query(account, &query).is_err() {
-                        self.search_error =
-                            Some("Can't save this recent search. Try again.".into());
-                    }
+                if let (Some(store), Some(account)) = (&self.store, self.account)
+                    && store.save_query(account, &query).is_err()
+                {
+                    self.search_error = Some("Can't save this recent search. Try again.".into());
                 }
             }
             SearchCommand::ClearHistory => {
